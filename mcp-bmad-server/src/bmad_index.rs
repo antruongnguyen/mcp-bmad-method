@@ -16,6 +16,7 @@ pub enum Phase {
     Implementation,
 }
 
+#[allow(dead_code)]
 impl Phase {
     pub fn all() -> &'static [Phase] {
         &[
@@ -68,6 +69,7 @@ pub enum Track {
     Enterprise,
 }
 
+#[allow(dead_code)]
 impl Track {
     pub fn all() -> &'static [Track] {
         &[Track::QuickFlow, Track::BmadMethod, Track::Enterprise]
@@ -147,6 +149,15 @@ pub struct CoreTool {
 // Index
 // ---------------------------------------------------------------------------
 
+/// Result of a readiness check for entering Implementation phase.
+#[derive(Debug, Clone)]
+pub struct ReadinessResult {
+    pub ready: bool,
+    pub missing_artifacts: Vec<String>,
+    pub warnings: Vec<String>,
+    pub next_action: String,
+}
+
 /// The in-memory index of all BMad Method content.
 pub struct BmadIndex {
     workflows: HashMap<&'static str, Workflow>,
@@ -155,6 +166,7 @@ pub struct BmadIndex {
     phase_workflows: HashMap<Phase, Vec<&'static str>>,
 }
 
+#[allow(dead_code)]
 impl BmadIndex {
     /// Build the index. This is called once at startup.
     pub fn build() -> Self {
@@ -252,6 +264,197 @@ impl BmadIndex {
 
     pub fn core_tools(&self) -> &[CoreTool] {
         &self.core_tools
+    }
+
+    // -- State inference --
+
+    /// Known artifact keywords and the workflow that produces them.
+    const ARTIFACT_MAP: &[(&str, &str)] = &[
+        ("brainstorming report", "bmad-brainstorming"),
+        ("brainstorming-report", "bmad-brainstorming"),
+        ("product brief", "bmad-create-product-brief"),
+        ("product-brief", "bmad-create-product-brief"),
+        ("prd", "bmad-create-prd"),
+        ("ux spec", "bmad-create-ux-design"),
+        ("ux-spec", "bmad-create-ux-design"),
+        ("ux design", "bmad-create-ux-design"),
+        ("architecture", "bmad-create-architecture"),
+        ("architecture.md", "bmad-create-architecture"),
+        ("adr", "bmad-create-architecture"),
+        ("epics", "bmad-create-epics-and-stories"),
+        ("stories", "bmad-create-epics-and-stories"),
+        ("epic", "bmad-create-epics-and-stories"),
+        ("story", "bmad-create-epics-and-stories"),
+        ("readiness check", "bmad-check-implementation-readiness"),
+        ("implementation readiness", "bmad-check-implementation-readiness"),
+        ("sprint status", "bmad-sprint-planning"),
+        ("sprint-status", "bmad-sprint-planning"),
+        ("sprint plan", "bmad-sprint-planning"),
+    ];
+
+    /// Parse a free-text project state description and return the set of
+    /// workflow ids whose artifacts are mentioned as existing.
+    pub fn infer_completed_workflows(project_state: &str) -> Vec<&'static str> {
+        let lower = project_state.to_lowercase();
+        let mut completed = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for &(keyword, workflow_id) in Self::ARTIFACT_MAP {
+            if lower.contains(keyword) && seen.insert(workflow_id) {
+                completed.push(workflow_id);
+            }
+        }
+
+        completed
+    }
+
+    /// Determine which phase the project is currently in, based on which
+    /// workflows have been completed.
+    pub fn infer_current_phase(completed: &[&str]) -> Phase {
+        let has = |id: &str| completed.contains(&id);
+
+        if has("bmad-sprint-planning") || has("bmad-check-implementation-readiness") {
+            return Phase::Implementation;
+        }
+        if has("bmad-create-architecture") || has("bmad-create-epics-and-stories") {
+            return Phase::Solutioning;
+        }
+        if has("bmad-create-prd") || has("bmad-create-ux-design") {
+            return Phase::Planning;
+        }
+        if has("bmad-brainstorming")
+            || has("bmad-market-research")
+            || has("bmad-domain-research")
+            || has("bmad-technical-research")
+            || has("bmad-create-product-brief")
+        {
+            return Phase::Analysis;
+        }
+        // Nothing completed — start at Analysis
+        Phase::Analysis
+    }
+
+    /// Recommend the next workflow to run given completed workflows and
+    /// an optional last-completed workflow id.
+    pub fn recommend_next(
+        &self,
+        completed: &[&str],
+        last_workflow: Option<&str>,
+    ) -> Vec<&Workflow> {
+        // If a specific last workflow is given, use its next_steps
+        if let Some(last) = last_workflow
+            && let Some(wf) = self.get_workflow(last)
+        {
+            let candidates: Vec<&Workflow> = wf
+                .next_steps
+                .iter()
+                .filter(|id| !completed.contains(id))
+                .filter_map(|id| self.get_workflow(id))
+                .collect();
+            if !candidates.is_empty() {
+                return candidates;
+            }
+        }
+
+        // Otherwise, infer from current phase
+        let phase = Self::infer_current_phase(completed);
+        let next_ids = self.get_next_steps(phase);
+        let candidates: Vec<&Workflow> = next_ids
+            .iter()
+            .filter(|id| !completed.contains(id))
+            .filter_map(|id| self.get_workflow(id))
+            .collect();
+
+        if !candidates.is_empty() {
+            return candidates;
+        }
+
+        // Current phase workflows that haven't been completed
+        self.get_phase_workflows(phase)
+            .iter()
+            .filter(|id| !completed.contains(id))
+            .filter_map(|id| self.get_workflow(id))
+            .collect()
+    }
+
+    /// Search workflows, agents, and phases for a keyword (for bmad_help).
+    pub fn search(&self, query: &str) -> Vec<String> {
+        let lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        // Search agents
+        for agent in self.agents.values() {
+            if agent.name.to_lowercase().contains(&lower)
+                || agent.skill_id.to_lowercase().contains(&lower)
+                || agent.persona.to_lowercase().contains(&lower)
+            {
+                let workflows: Vec<&str> = agent.primary_workflows.clone();
+                results.push(format!(
+                    "**Agent: {} (persona: {}, skill: `{}`)**\n  Primary workflows: {}",
+                    agent.name,
+                    agent.persona,
+                    agent.skill_id,
+                    workflows.join(", "),
+                ));
+            }
+        }
+
+        // Search workflows
+        for wf in self.workflows.values() {
+            if wf.id.to_lowercase().contains(&lower)
+                || wf.description.to_lowercase().contains(&lower)
+                || wf.agent.to_lowercase().contains(&lower)
+                || wf.produces.to_lowercase().contains(&lower)
+            {
+                let tracks: Vec<&str> = wf.tracks.iter().map(|t| t.name()).collect();
+                results.push(format!(
+                    "**Workflow: `{}`** — {}\n  Phase: {} | Agent: `{}` | Produces: {} | Tracks: {}",
+                    wf.id,
+                    wf.description,
+                    wf.phase.name(),
+                    wf.agent,
+                    wf.produces,
+                    tracks.join(", "),
+                ));
+            }
+        }
+
+        // Search phases
+        for phase in Phase::all() {
+            if phase.name().to_lowercase().contains(&lower) {
+                results.push(format!(
+                    "**Phase {}: {}** — {}",
+                    phase.number(),
+                    phase.name(),
+                    phase.description(),
+                ));
+            }
+        }
+
+        // Search tracks
+        for track in Track::all() {
+            if track.name().to_lowercase().contains(&lower) {
+                results.push(format!(
+                    "**Track: {}** — {}",
+                    track.name(),
+                    track.description(),
+                ));
+            }
+        }
+
+        // Search core tools
+        for tool in &self.core_tools {
+            if tool.id.to_lowercase().contains(&lower)
+                || tool.description.to_lowercase().contains(&lower)
+            {
+                results.push(format!(
+                    "**Core Tool: `{}`** — {}",
+                    tool.id, tool.description,
+                ));
+            }
+        }
+
+        results
     }
 
     // -----------------------------------------------------------------------
@@ -939,5 +1142,110 @@ mod tests {
         let docs = BmadIndex::raw_docs();
         assert!(docs.len() > 1000, "embedded docs should be > 1000 chars");
         assert!(docs.contains("BMad Method"));
+    }
+
+    // ------------------------------------------------------------------
+    // State inference / next-step recommendation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn infer_completed_from_prd_and_architecture() {
+        let completed = BmadIndex::infer_completed_workflows("has PRD, has architecture");
+        assert!(completed.contains(&"bmad-create-prd"));
+        assert!(completed.contains(&"bmad-create-architecture"));
+        assert!(!completed.contains(&"bmad-create-ux-design"));
+    }
+
+    #[test]
+    fn infer_completed_from_empty_state() {
+        let completed = BmadIndex::infer_completed_workflows("nothing yet");
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn infer_completed_is_case_insensitive() {
+        let completed = BmadIndex::infer_completed_workflows("has prd and ARCHITECTURE and UX spec");
+        assert!(completed.contains(&"bmad-create-prd"));
+        assert!(completed.contains(&"bmad-create-architecture"));
+        assert!(completed.contains(&"bmad-create-ux-design"));
+    }
+
+    #[test]
+    fn infer_completed_no_duplicates() {
+        // "prd" appears once but should only yield one entry
+        let completed = BmadIndex::infer_completed_workflows("has PRD");
+        let count = completed.iter().filter(|&&id| id == "bmad-create-prd").count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn infer_phase_empty_is_analysis() {
+        let phase = BmadIndex::infer_current_phase(&[]);
+        assert_eq!(phase, Phase::Analysis);
+    }
+
+    #[test]
+    fn infer_phase_after_prd() {
+        let phase = BmadIndex::infer_current_phase(&["bmad-create-prd"]);
+        assert_eq!(phase, Phase::Planning);
+    }
+
+    #[test]
+    fn infer_phase_after_architecture() {
+        let phase = BmadIndex::infer_current_phase(&["bmad-create-prd", "bmad-create-architecture"]);
+        assert_eq!(phase, Phase::Solutioning);
+    }
+
+    #[test]
+    fn infer_phase_after_sprint_planning() {
+        let phase = BmadIndex::infer_current_phase(&[
+            "bmad-create-prd",
+            "bmad-create-architecture",
+            "bmad-sprint-planning",
+        ]);
+        assert_eq!(phase, Phase::Implementation);
+    }
+
+    #[test]
+    fn recommend_next_from_scratch() {
+        let idx = index();
+        let recs = idx.recommend_next(&[], None);
+        // From Analysis phase, should suggest PRD or quick-dev
+        let ids: Vec<&str> = recs.iter().map(|w| w.id).collect();
+        assert!(
+            ids.contains(&"bmad-create-prd") || ids.contains(&"bmad-brainstorming"),
+            "expected analysis/planning workflows but got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn recommend_next_after_prd() {
+        let idx = index();
+        let recs = idx.recommend_next(
+            &["bmad-create-prd"],
+            Some("bmad-create-prd"),
+        );
+        let ids: Vec<&str> = recs.iter().map(|w| w.id).collect();
+        assert!(ids.contains(&"bmad-create-architecture") || ids.contains(&"bmad-create-ux-design"));
+    }
+
+    // ------------------------------------------------------------------
+    // Search
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn search_finds_sm_agent() {
+        let idx = index();
+        let results = idx.search("scrum master");
+        assert!(!results.is_empty());
+        let joined = results.join("\n");
+        assert!(joined.contains("Scrum Master") || joined.contains("bmad-sm"));
+    }
+
+    #[test]
+    fn search_finds_phase() {
+        let idx = index();
+        let results = idx.search("analysis");
+        assert!(!results.is_empty());
     }
 }
