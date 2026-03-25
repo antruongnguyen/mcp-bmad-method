@@ -258,7 +258,26 @@ impl BmadIndex {
 
     /// List all agents.
     pub fn all_agents(&self) -> Vec<&Agent> {
-        self.agents.values().collect()
+        let mut agents: Vec<&Agent> = self.agents.values().collect();
+        agents.sort_by_key(|a| a.skill_id);
+        agents
+    }
+
+    /// Return agents whose primary workflows include at least one workflow in
+    /// the given phase.
+    pub fn get_agents_by_phase(&self, phase: Phase) -> Vec<&Agent> {
+        let phase_wfs = self.get_phase_workflows(phase);
+        let mut agents: Vec<&Agent> = self
+            .agents
+            .values()
+            .filter(|a| {
+                a.primary_workflows
+                    .iter()
+                    .any(|wf_id| phase_wfs.contains(wf_id))
+            })
+            .collect();
+        agents.sort_by_key(|a| a.skill_id);
+        agents
     }
 
     // -- Core tools --
@@ -1190,6 +1209,79 @@ mod tests {
         let idx = index();
         let agents = idx.all_agents();
         assert_eq!(agents.len(), 9, "expected 9 default agents");
+    }
+
+    #[test]
+    fn all_agents_sorted_by_skill_id() {
+        let idx = index();
+        let agents = idx.all_agents();
+        let ids: Vec<&str> = agents.iter().map(|a| a.skill_id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "all_agents should return agents sorted by skill_id");
+    }
+
+    #[test]
+    fn get_agent_pm() {
+        let idx = index();
+        let agent = idx.get_agent("bmad-pm").unwrap();
+        assert_eq!(agent.name, "Product Manager");
+        assert_eq!(agent.persona, "John");
+        assert!(agent.primary_workflows.contains(&"bmad-create-prd"));
+        assert!(agent.primary_workflows.contains(&"bmad-create-epics-and-stories"));
+    }
+
+    #[test]
+    fn get_agent_architect() {
+        let idx = index();
+        let agent = idx.get_agent("bmad-architect").unwrap();
+        assert_eq!(agent.name, "Architect");
+        assert_eq!(agent.persona, "Winston");
+        assert!(agent.primary_workflows.contains(&"bmad-create-architecture"));
+    }
+
+    #[test]
+    fn get_agent_unknown_returns_none() {
+        let idx = index();
+        assert!(idx.get_agent("nonexistent").is_none());
+    }
+
+    #[test]
+    fn agents_by_phase_analysis() {
+        let idx = index();
+        let agents = idx.get_agents_by_phase(Phase::Analysis);
+        let ids: Vec<&str> = agents.iter().map(|a| a.skill_id).collect();
+        assert!(ids.contains(&"bmad-analyst"), "Analyst should be in Analysis phase");
+        assert!(!ids.contains(&"bmad-dev"), "Developer should not be in Analysis phase");
+    }
+
+    #[test]
+    fn agents_by_phase_implementation() {
+        let idx = index();
+        let agents = idx.get_agents_by_phase(Phase::Implementation);
+        let ids: Vec<&str> = agents.iter().map(|a| a.skill_id).collect();
+        assert!(ids.contains(&"bmad-dev"), "Developer should be in Implementation phase");
+        assert!(ids.contains(&"bmad-sm"), "Scrum Master should be in Implementation phase");
+        assert!(ids.contains(&"bmad-master"), "Quick Flow Solo Dev should be in Implementation phase");
+    }
+
+    #[test]
+    fn agents_by_phase_solutioning() {
+        let idx = index();
+        let agents = idx.get_agents_by_phase(Phase::Solutioning);
+        let ids: Vec<&str> = agents.iter().map(|a| a.skill_id).collect();
+        assert!(ids.contains(&"bmad-architect"), "Architect should be in Solutioning phase");
+        assert!(ids.contains(&"bmad-pm"), "PM should be in Solutioning phase");
+    }
+
+    #[test]
+    fn agents_by_phase_sorted() {
+        let idx = index();
+        let agents = idx.get_agents_by_phase(Phase::Implementation);
+        let ids: Vec<&str> = agents.iter().map(|a| a.skill_id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "agents_by_phase should return sorted results");
     }
 
     // ------------------------------------------------------------------

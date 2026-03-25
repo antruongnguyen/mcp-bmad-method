@@ -78,6 +78,22 @@ struct CheckReadinessRequest {
     track: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ListAgentsRequest {
+    /// Optional filter: only return agents that handle workflows in this phase.
+    #[schemars(
+        description = "Optional phase filter: Analysis, Planning, Solutioning, or Implementation"
+    )]
+    phase: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AgentInfoRequest {
+    /// The agent skill id, e.g. "bmad-pm".
+    #[schemars(description = "The agent skill id, e.g. \"bmad-pm\" or \"bmad-architect\"")]
+    agent_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -451,6 +467,119 @@ impl BmadServer {
         Ok(CallToolResult::success(vec![Content::text(
             lines.join("\n"),
         )]))
+    }
+
+    #[tool(description = "List all BMad Method agents. Optionally filter by phase to show only \
+        agents that handle workflows in that phase. Returns each agent's skill id, role, \
+        persona name, and primary workflows.")]
+    async fn bmad_list_agents(
+        &self,
+        Parameters(req): Parameters<ListAgentsRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let idx = BmadIndex::build();
+
+        let agents = if let Some(ref phase_str) = req.phase {
+            match parse_phase(phase_str) {
+                Some(phase) => idx.get_agents_by_phase(phase),
+                None => {
+                    let text = format!(
+                        "Unknown phase '{}'. Valid phases: Analysis, Planning, Solutioning, Implementation",
+                        phase_str
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(text)]));
+                }
+            }
+        } else {
+            idx.all_agents()
+        };
+
+        let header = if let Some(ref phase_str) = req.phase {
+            format!("## BMad Agents — {} Phase\n", phase_str)
+        } else {
+            "## BMad Agents\n".to_string()
+        };
+
+        let mut lines = vec![header];
+
+        if agents.is_empty() {
+            lines.push("No agents found for the given filter.".to_string());
+        } else {
+            for agent in &agents {
+                let workflows = agent.primary_workflows.join(", ");
+                lines.push(format!(
+                    "### `{skill_id}` — {name} (persona: {persona})\n\
+                     - **Workflows:** {workflows}\n",
+                    skill_id = agent.skill_id,
+                    name = agent.name,
+                    persona = agent.persona,
+                ));
+            }
+            lines.push(format!("*{} agent(s) total*", agents.len()));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
+    }
+
+    #[tool(description = "Get detailed information about a specific BMad Method agent by skill id. \
+        Returns the agent's full profile: name, persona, skill id, and all primary workflows \
+        with their descriptions.")]
+    async fn bmad_agent_info(
+        &self,
+        Parameters(req): Parameters<AgentInfoRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let idx = BmadIndex::build();
+        match idx.get_agent(&req.agent_id) {
+            Some(agent) => {
+                let mut lines = vec![format!(
+                    "## Agent: {name}\n\n\
+                     **Skill ID:** `{skill_id}`\n\
+                     **Persona:** {persona}\n\
+                     **Role:** {name}\n\n\
+                     ### Primary Workflows\n",
+                    name = agent.name,
+                    skill_id = agent.skill_id,
+                    persona = agent.persona,
+                )];
+
+                for wf_id in &agent.primary_workflows {
+                    if let Some(wf) = idx.get_workflow(wf_id) {
+                        let tracks: Vec<&str> = wf.tracks.iter().map(|t| t.name()).collect();
+                        lines.push(format!(
+                            "- `{id}` — {desc}\n  Phase: {phase} | Produces: {produces} | Tracks: {tracks}",
+                            id = wf.id,
+                            desc = wf.description,
+                            phase = wf.phase.name(),
+                            produces = wf.produces,
+                            tracks = tracks.join(", "),
+                        ));
+                    } else {
+                        lines.push(format!("- `{wf_id}` — (workflow not found in index)"));
+                    }
+                }
+
+                lines.push(format!(
+                    "\n### How to invoke\n\n\
+                     Use the agent skill `{}` to start any of the above workflows. \
+                     The agent will guide you through the process.",
+                    agent.skill_id,
+                ));
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    lines.join("\n"),
+                )]))
+            }
+            None => {
+                let all: Vec<&str> = idx.all_agents().iter().map(|a| a.skill_id).collect();
+                let text = format!(
+                    "Agent '{}' not found. Available agents:\n{}",
+                    req.agent_id,
+                    all.join(", ")
+                );
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+        }
     }
 }
 
