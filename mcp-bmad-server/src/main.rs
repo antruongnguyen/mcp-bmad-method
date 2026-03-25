@@ -358,7 +358,7 @@ impl BmadServer {
 
         if results.is_empty() {
             // Fall back to raw docs search
-            let docs = BmadIndex::raw_docs();
+            let docs = idx.raw_docs();
             let lower = search_term.to_lowercase();
             let relevant: Vec<&str> = docs
                 .lines()

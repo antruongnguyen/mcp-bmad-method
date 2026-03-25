@@ -165,12 +165,18 @@ pub struct BmadIndex {
     agents: HashMap<&'static str, Agent>,
     core_tools: Vec<CoreTool>,
     phase_workflows: HashMap<Phase, Vec<&'static str>>,
+    docs: String,
 }
 
 #[allow(dead_code)]
 impl BmadIndex {
-    /// Build the index. This is called once at startup.
+    /// Build the index with the embedded documentation.
     pub fn build() -> Self {
+        Self::build_with_docs(BMAD_DOCS.to_string())
+    }
+
+    /// Build the index with custom documentation content.
+    pub fn build_with_docs(docs: String) -> Self {
         let agents = Self::build_agents();
         let workflows = Self::build_workflows();
         let core_tools = Self::build_core_tools();
@@ -188,11 +194,17 @@ impl BmadIndex {
             agents,
             core_tools,
             phase_workflows,
+            docs,
         }
     }
 
-    /// Return the raw embedded documentation.
-    pub fn raw_docs() -> &'static str {
+    /// Return the raw documentation (embedded or custom).
+    pub fn raw_docs(&self) -> &str {
+        &self.docs
+    }
+
+    /// Return the embedded documentation (always available).
+    pub fn embedded_docs() -> &'static str {
         BMAD_DOCS
     }
 
@@ -1343,7 +1355,8 @@ mod tests {
 
     #[test]
     fn raw_docs_is_nonempty() {
-        let docs = BmadIndex::raw_docs();
+        let idx = BmadIndex::build();
+        let docs = idx.raw_docs();
         assert!(docs.len() > 1000, "embedded docs should be > 1000 chars");
         assert!(docs.contains("BMad Method"));
     }
