@@ -151,6 +151,7 @@ pub struct CoreTool {
 
 /// Result of a readiness check for entering Implementation phase.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ReadinessResult {
     pub ready: bool,
     pub missing_artifacts: Vec<String>,
@@ -375,6 +376,117 @@ impl BmadIndex {
             .filter(|id| !completed.contains(id))
             .filter_map(|id| self.get_workflow(id))
             .collect()
+    }
+
+    // -- Readiness check --
+
+    /// Check whether a project is ready to enter the Implementation phase
+    /// for the given track, based on a free-text `project_state` description.
+    pub fn check_readiness(project_state: &str, track: Track) -> ReadinessResult {
+        let lower = project_state.to_lowercase();
+
+        let has = |keywords: &[&str]| -> bool {
+            keywords
+                .iter()
+                .any(|kw| lower.contains(&kw.to_lowercase()))
+        };
+
+        let has_prd = has(&["prd", "product requirements"]);
+        let has_architecture = has(&["architecture", "adr"]);
+        let has_epics = has(&["epics", "epic", "stories", "story"]);
+        let has_tech_spec = has(&["tech-spec", "tech spec", "spec-", "spec."]);
+        let has_security = has(&["security"]);
+        let has_devops = has(&["devops", "dev-ops", "infrastructure", "ci/cd", "cicd"]);
+
+        type ArtifactCheck<'a> = Vec<(&'a str, bool)>;
+        let (required, optional): (ArtifactCheck<'_>, ArtifactCheck<'_>) = match track {
+            Track::QuickFlow => (
+                vec![("tech-spec", has_tech_spec)],
+                vec![],
+            ),
+            Track::BmadMethod => (
+                vec![
+                    ("PRD", has_prd),
+                    ("architecture", has_architecture),
+                    ("epics/stories", has_epics),
+                ],
+                vec![
+                    ("UX spec", has(&["ux spec", "ux-spec", "ux design"])),
+                    (
+                        "implementation readiness check",
+                        has(&["readiness check", "implementation readiness"]),
+                    ),
+                ],
+            ),
+            Track::Enterprise => (
+                vec![
+                    ("PRD", has_prd),
+                    ("architecture", has_architecture),
+                    ("security docs", has_security),
+                    ("DevOps docs", has_devops),
+                    ("epics/stories", has_epics),
+                ],
+                vec![
+                    ("UX spec", has(&["ux spec", "ux-spec", "ux design"])),
+                    (
+                        "implementation readiness check",
+                        has(&["readiness check", "implementation readiness"]),
+                    ),
+                ],
+            ),
+        };
+
+        let missing: Vec<String> = required
+            .iter()
+            .filter(|(_, present)| !present)
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+
+        let warnings: Vec<String> = optional
+            .iter()
+            .filter(|(_, present)| !present)
+            .map(|(name, _)| format!("Recommended: {name}"))
+            .collect();
+
+        let ready = missing.is_empty();
+
+        let next_action = if ready {
+            match track {
+                Track::QuickFlow => {
+                    "Ready! Run `bmad-quick-dev` to start implementation.".to_string()
+                }
+                _ => "Ready! Run `bmad-sprint-planning` to initialize the sprint and begin implementation.".to_string(),
+            }
+        } else {
+            let first_missing = &missing[0];
+            match first_missing.as_str() {
+                "tech-spec" => {
+                    "Create a tech-spec using `bmad-quick-dev` (Quick Flow track).".to_string()
+                }
+                "PRD" => "Create a PRD using `bmad-create-prd` (agent: bmad-pm).".to_string(),
+                "architecture" => {
+                    "Create architecture docs using `bmad-create-architecture` (agent: bmad-architect).".to_string()
+                }
+                "security docs" => {
+                    "Add security documentation as part of the architecture phase.".to_string()
+                }
+                "DevOps docs" => {
+                    "Add DevOps/infrastructure documentation as part of the architecture phase."
+                        .to_string()
+                }
+                "epics/stories" => {
+                    "Break requirements into epics and stories using `bmad-create-epics-and-stories` (agent: bmad-pm).".to_string()
+                }
+                _ => format!("Create the missing artifact: {first_missing}"),
+            }
+        };
+
+        ReadinessResult {
+            ready,
+            missing_artifacts: missing,
+            warnings,
+            next_action,
+        }
     }
 
     /// Search workflows, agents, and phases for a keyword (for bmad_help).
@@ -1247,5 +1359,174 @@ mod tests {
         let idx = index();
         let results = idx.search("analysis");
         assert!(!results.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Readiness check
+    // ------------------------------------------------------------------
+
+    // Quick Flow track
+
+    #[test]
+    fn readiness_quick_flow_missing_tech_spec() {
+        let result = BmadIndex::check_readiness("nothing yet", Track::QuickFlow);
+        assert!(!result.ready);
+        assert_eq!(result.missing_artifacts, vec!["tech-spec"]);
+        assert!(result.next_action.contains("bmad-quick-dev"));
+    }
+
+    #[test]
+    fn readiness_quick_flow_has_tech_spec() {
+        let result = BmadIndex::check_readiness("tech-spec done", Track::QuickFlow);
+        assert!(result.ready);
+        assert!(result.missing_artifacts.is_empty());
+        assert!(result.next_action.contains("bmad-quick-dev"));
+    }
+
+    #[test]
+    fn readiness_quick_flow_has_spec_dot_variant() {
+        let result = BmadIndex::check_readiness("spec.md written", Track::QuickFlow);
+        assert!(result.ready);
+    }
+
+    // BMad Method track
+
+    #[test]
+    fn readiness_bmad_all_present() {
+        let result = BmadIndex::check_readiness(
+            "PRD.md done, architecture.md done, epics created",
+            Track::BmadMethod,
+        );
+        assert!(result.ready);
+        assert!(result.missing_artifacts.is_empty());
+        assert!(result.next_action.contains("bmad-sprint-planning"));
+    }
+
+    #[test]
+    fn readiness_bmad_missing_prd() {
+        let result = BmadIndex::check_readiness(
+            "architecture.md done, epics created",
+            Track::BmadMethod,
+        );
+        assert!(!result.ready);
+        assert!(result.missing_artifacts.contains(&"PRD".to_string()));
+        assert!(!result.missing_artifacts.contains(&"architecture".to_string()));
+        assert!(!result.missing_artifacts.contains(&"epics/stories".to_string()));
+        assert!(result.next_action.contains("bmad-create-prd"));
+    }
+
+    #[test]
+    fn readiness_bmad_missing_architecture() {
+        let result = BmadIndex::check_readiness("PRD done, epics created", Track::BmadMethod);
+        assert!(!result.ready);
+        assert!(result.missing_artifacts.contains(&"architecture".to_string()));
+        assert!(!result.missing_artifacts.contains(&"PRD".to_string()));
+    }
+
+    #[test]
+    fn readiness_bmad_missing_epics() {
+        let result = BmadIndex::check_readiness(
+            "PRD done, architecture done",
+            Track::BmadMethod,
+        );
+        assert!(!result.ready);
+        assert!(result.missing_artifacts.contains(&"epics/stories".to_string()));
+    }
+
+    #[test]
+    fn readiness_bmad_missing_all() {
+        let result = BmadIndex::check_readiness("nothing yet", Track::BmadMethod);
+        assert!(!result.ready);
+        assert_eq!(result.missing_artifacts.len(), 3);
+        assert!(result.missing_artifacts.contains(&"PRD".to_string()));
+        assert!(result.missing_artifacts.contains(&"architecture".to_string()));
+        assert!(result.missing_artifacts.contains(&"epics/stories".to_string()));
+    }
+
+    #[test]
+    fn readiness_bmad_warns_about_optional() {
+        let result = BmadIndex::check_readiness(
+            "PRD done, architecture done, epics created",
+            Track::BmadMethod,
+        );
+        assert!(result.ready);
+        assert!(!result.warnings.is_empty());
+        let warnings_text = result.warnings.join(" ");
+        assert!(warnings_text.contains("UX spec"));
+        assert!(warnings_text.contains("implementation readiness check"));
+    }
+
+    #[test]
+    fn readiness_bmad_no_warnings_when_optional_present() {
+        let result = BmadIndex::check_readiness(
+            "PRD done, architecture done, epics created, UX spec done, readiness check passed",
+            Track::BmadMethod,
+        );
+        assert!(result.ready);
+        assert!(result.warnings.is_empty());
+    }
+
+    // Enterprise track
+
+    #[test]
+    fn readiness_enterprise_all_present() {
+        let result = BmadIndex::check_readiness(
+            "PRD done, architecture done, security docs done, DevOps docs done, epics created",
+            Track::Enterprise,
+        );
+        assert!(result.ready);
+        assert!(result.missing_artifacts.is_empty());
+        assert!(result.next_action.contains("bmad-sprint-planning"));
+    }
+
+    #[test]
+    fn readiness_enterprise_missing_security() {
+        let result = BmadIndex::check_readiness(
+            "PRD done, architecture done, DevOps docs done, epics created",
+            Track::Enterprise,
+        );
+        assert!(!result.ready);
+        assert!(result.missing_artifacts.contains(&"security docs".to_string()));
+    }
+
+    #[test]
+    fn readiness_enterprise_missing_devops() {
+        let result = BmadIndex::check_readiness(
+            "PRD done, architecture done, security docs done, epics created",
+            Track::Enterprise,
+        );
+        assert!(!result.ready);
+        assert!(result.missing_artifacts.contains(&"DevOps docs".to_string()));
+    }
+
+    #[test]
+    fn readiness_enterprise_missing_multiple() {
+        let result = BmadIndex::check_readiness("PRD done", Track::Enterprise);
+        assert!(!result.ready);
+        assert!(result.missing_artifacts.len() >= 3);
+        assert!(result.missing_artifacts.contains(&"architecture".to_string()));
+        assert!(result.missing_artifacts.contains(&"security docs".to_string()));
+        assert!(result.missing_artifacts.contains(&"DevOps docs".to_string()));
+        assert!(result.missing_artifacts.contains(&"epics/stories".to_string()));
+    }
+
+    #[test]
+    fn readiness_enterprise_cicd_counts_as_devops() {
+        let result = BmadIndex::check_readiness(
+            "PRD done, architecture done, security docs done, CI/CD configured, epics created",
+            Track::Enterprise,
+        );
+        assert!(result.ready);
+    }
+
+    // Default track
+
+    #[test]
+    fn readiness_case_insensitive() {
+        let result = BmadIndex::check_readiness(
+            "prd done, ARCHITECTURE done, Epics created",
+            Track::BmadMethod,
+        );
+        assert!(result.ready);
     }
 }

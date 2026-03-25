@@ -61,6 +61,23 @@ struct HelpRequest {
     context: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct CheckReadinessRequest {
+    /// Describe what planning artifacts exist.
+    /// E.g. "PRD.md done, architecture.md done, epics created, no sprint-status.yaml yet"
+    #[schemars(
+        description = "Describe what planning artifacts exist, e.g. \"PRD.md done, architecture.md done, epics created\""
+    )]
+    project_state: String,
+    /// The planning track being used: Quick Flow, BMad Method, or Enterprise.
+    /// Defaults to "BMad Method" if not specified.
+    #[schemars(
+        description = "Planning track: Quick Flow, BMad Method, or Enterprise. Defaults to BMad Method."
+    )]
+    track: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -382,6 +399,54 @@ impl BmadServer {
                 ));
             }
         }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
+    }
+
+    #[tool(description = "Check whether a project is ready to enter the Implementation phase. \
+        Validates that all required planning artifacts exist for the given track \
+        (Quick Flow, BMad Method, or Enterprise). Returns readiness status, \
+        missing artifacts, warnings, and recommended next action.")]
+    async fn bmad_check_readiness(
+        &self,
+        Parameters(req): Parameters<CheckReadinessRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let track = req
+            .track
+            .as_deref()
+            .and_then(parse_track)
+            .unwrap_or(Track::BmadMethod);
+
+        let result = BmadIndex::check_readiness(&req.project_state, track);
+
+        let status = if result.ready { "READY" } else { "NOT READY" };
+        let mut lines = vec![format!(
+            "## Implementation Readiness: {status}\n\n\
+             **Track:** {track}\n\
+             **Project state:** {state}\n",
+            track = track.name(),
+            state = req.project_state,
+        )];
+
+        if !result.missing_artifacts.is_empty() {
+            lines.push("### Missing Artifacts (required)\n".to_string());
+            for artifact in &result.missing_artifacts {
+                lines.push(format!("- {artifact}"));
+            }
+            lines.push(String::new());
+        }
+
+        if !result.warnings.is_empty() {
+            lines.push("### Warnings\n".to_string());
+            for warning in &result.warnings {
+                lines.push(format!("- {warning}"));
+            }
+            lines.push(String::new());
+        }
+
+        lines.push(format!("### Next Action\n\n{}", result.next_action));
 
         Ok(CallToolResult::success(vec![Content::text(
             lines.join("\n"),
