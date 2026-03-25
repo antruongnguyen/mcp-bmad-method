@@ -1,0 +1,15 @@
+# Lightweight image using a prebuilt binary from GitHub Releases.
+# Usage:
+#   Download the linux binary from the release, extract it, then:
+#   docker build -f Dockerfile.prebuilt -t mcp-bmad-server .
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY mcp-bmad-server /usr/local/bin/mcp-bmad-server
+RUN chmod +x /usr/local/bin/mcp-bmad-server
+
+EXPOSE 3000
+
+ENTRYPOINT ["mcp-bmad-server"]
