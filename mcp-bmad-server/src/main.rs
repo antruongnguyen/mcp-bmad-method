@@ -2,12 +2,20 @@ mod bmad_index;
 
 use std::sync::Arc;
 
-use bmad_index::{BmadIndex, DocSource, Phase, ScaffoldResult, SprintGuideResult, Track};
+use bmad_index::{BmadIndex, DocSource, Phase, ScaffoldResult, SprintGuideResult, TemplateVars, Track, WorkflowStep};
 use rmcp::{
-    ServerHandler, ServiceExt,
+    RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, Content, Implementation, ListResourceTemplatesResult,
+        ListResourcesResult, PaginatedRequestParams, RawResource, RawResourceTemplate,
+        ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+        ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo,
+        SubscribeRequestParams, UnsubscribeRequestParams,
+        AnnotateAble,
+    },
     schemars, tool, tool_handler, tool_router,
+    service::RequestContext,
     transport::{
         stdio,
         streamable_http_server::{
@@ -238,6 +246,27 @@ struct ScaffoldResponse {
     next_steps: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct RunWorkflowResponse {
+    workflow_id: String,
+    action: String,
+    current_step: usize,
+    total_steps: usize,
+    completed: bool,
+    step: Option<RunWorkflowStepInfo>,
+    next_workflow: Option<String>,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct RunWorkflowStepInfo {
+    number: usize,
+    title: String,
+    instructions: String,
+    expected_output: String,
+    agent_guidance: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tool parameter types
 // ---------------------------------------------------------------------------
@@ -402,6 +431,38 @@ struct ScaffoldRequest {
         description = "Absolute or relative path to the project root directory. Defaults to current directory."
     )]
     project_dir: Option<String>,
+    /// Optional project name for template variable substitution.
+    #[schemars(description = "Project name substituted into templates as {{project_name}}")]
+    project_name: Option<String>,
+    /// Optional author name for template variable substitution.
+    #[schemars(description = "Author name substituted into templates as {{author}}")]
+    author: Option<String>,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct RunWorkflowRequest {
+    /// Action to perform: "start", "next", or "status".
+    #[schemars(
+        description = "Action: \"start\" to begin a workflow, \"next\" to advance to the next step, \"status\" to check progress"
+    )]
+    action: String,
+    /// The workflow skill id (required for "start"). E.g. "bmad-create-prd".
+    #[schemars(
+        description = "Workflow skill id, e.g. \"bmad-create-prd\". Required for action=start."
+    )]
+    workflow_id: Option<String>,
+    /// Project directory path. Required for all actions.
+    #[schemars(description = "Absolute or relative path to the project root directory.")]
+    project_dir: String,
+    /// Optional result/notes from completing the current step (used with action=next).
+    #[schemars(
+        description = "Optional notes from the completed step, used with action=next."
+    )]
+    step_result: Option<String>,
     /// Output format: "markdown" (default) or "json".
     #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
     output_format: Option<String>,
@@ -411,10 +472,15 @@ struct ScaffoldRequest {
 // Server
 // ---------------------------------------------------------------------------
 
+type Subscriptions = Arc<RwLock<Vec<(String, rmcp::Peer<RoleServer>)>>>;
+
 #[derive(Clone)]
 struct BmadServer {
     tool_router: ToolRouter<Self>,
     index: Arc<RwLock<BmadIndex>>,
+    /// URIs that clients have subscribed to for update notifications,
+    /// paired with the peer that subscribed (for sending notifications).
+    subscriptions: Subscriptions,
 }
 
 fn parse_phase(s: &str) -> Option<Phase> {
@@ -554,6 +620,7 @@ impl BmadServer {
         Self {
             tool_router: Self::tool_router(),
             index,
+            subscriptions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -1379,6 +1446,17 @@ impl BmadServer {
 
         tracing::info!(%url, bytes, "index rebuilt with refreshed docs");
 
+        // Notify all resource subscribers that docs have been updated
+        let subs = self.subscriptions.read().await;
+        for (uri, peer) in subs.iter() {
+            let param = ResourceUpdatedNotificationParam::new(uri.clone());
+            if let Err(e) = peer.notify_resource_updated(param).await {
+                tracing::warn!(%uri, %e, "failed to notify subscriber of resource update");
+            } else {
+                tracing::info!(%uri, "notified subscriber of resource update");
+            }
+        }
+
         let json_resp = RefreshResponse {
             status: "success".to_string(),
             message: format!("Documentation refreshed successfully ({bytes} bytes). Index rebuilt."),
@@ -1467,11 +1545,30 @@ impl BmadServer {
             ));
         }
 
+        let today = {
+            use std::time::SystemTime;
+            let secs = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let days = secs / 86400;
+            // Simple date calculation (good enough for YYYY-MM-DD)
+            let (y, m, d) = civil_from_days(days as i64);
+            format!("{y:04}-{m:02}-{d:02}")
+        };
+
+        let vars = TemplateVars {
+            project_name: req.project_name.unwrap_or_default(),
+            author: req.author.unwrap_or_default(),
+            date: today,
+            track: track.name().to_string(),
+        };
+
         let ScaffoldResult {
             files_created,
             track,
             next_steps,
-        } = BmadIndex::scaffold_project(&project_dir, track).map_err(|e| {
+        } = BmadIndex::scaffold_project(&project_dir, track, Some(&vars)).map_err(|e| {
             rmcp::ErrorData::internal_error(
                 format!("Failed to scaffold project: {e}"),
                 None,
@@ -1510,30 +1607,709 @@ impl BmadServer {
             dir_display,
         ));
 
+        if std::env::var("BMAD_TEMPLATES_DIR").is_ok() {
+            lines.push("\n> Templates loaded with `BMAD_TEMPLATES_DIR` override active.".to_string());
+        }
+
         let markdown = lines.join("\n");
         Ok(format_output(&req.output_format, &json_val, markdown))
     }
+    #[tool(description = "Interactively execute a BMad Method workflow step by step. \
+        Supports three actions: 'start' begins a new workflow session, 'next' advances to the \
+        next step (optionally recording the result of the current step), and 'status' shows \
+        current progress. Session state is persisted in _bmad/sessions/ within the project \
+        directory. On start, auto-detects completed steps from existing project artifacts.")]
+    async fn bmad_run_workflow(
+        &self,
+        Parameters(req): Parameters<RunWorkflowRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_dir = std::path::PathBuf::from(&req.project_dir);
+        if !project_dir.is_dir() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("Not a directory: {}", req.project_dir),
+                None,
+            ));
+        }
+
+        match req.action.as_str() {
+            "start" => self.run_workflow_start(&req, &project_dir).await,
+            "next" => self.run_workflow_next(&req, &project_dir).await,
+            "status" => self.run_workflow_status(&req, &project_dir).await,
+            other => Err(rmcp::ErrorData::invalid_params(
+                format!("Unknown action '{other}'. Valid actions: start, next, status"),
+                None,
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bmad_run_workflow helper methods
+// ---------------------------------------------------------------------------
+
+impl BmadServer {
+    async fn run_workflow_start(
+        &self,
+        req: &RunWorkflowRequest,
+        project_dir: &std::path::Path,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let workflow_id = req.workflow_id.as_deref().ok_or_else(|| {
+            rmcp::ErrorData::invalid_params("workflow_id is required for action=start", None)
+        })?;
+
+        let idx = self.index.read().await;
+        let wf = idx.get_workflow(workflow_id).ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "Unknown workflow '{workflow_id}'. Use bmad_get_workflow to list available workflows."
+                ),
+                None,
+            )
+        })?;
+        let wf_desc = wf.description.to_string();
+        let wf_agent = wf.agent.to_string();
+        let wf_next: Vec<String> = wf.next_steps.iter().map(|s| s.to_string()).collect();
+        drop(idx);
+
+        let steps = BmadIndex::get_workflow_steps(workflow_id).ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!("No step definitions available for workflow '{workflow_id}'"),
+                None,
+            )
+        })?;
+
+        let session = BmadIndex::start_session(project_dir, workflow_id).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to create session: {e}"), None)
+        })?;
+
+        BmadIndex::save_session(project_dir, &session).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to save session: {e}"), None)
+        })?;
+
+        if session.completed {
+            let next_wf = wf_next.first().cloned();
+            let json_resp = RunWorkflowResponse {
+                workflow_id: workflow_id.to_string(),
+                action: "start".to_string(),
+                current_step: session.current_step,
+                total_steps: session.total_steps,
+                completed: true,
+                step: None,
+                next_workflow: next_wf.clone(),
+                message: "Workflow already completed based on detected project artifacts."
+                    .to_string(),
+            };
+            let text = format!(
+                "## Workflow: {wf_id}\n\n\
+                 **Status:** Already completed (detected from project artifacts)\n\n\
+                 {next}",
+                wf_id = workflow_id,
+                next = if let Some(ref nw) = next_wf {
+                    format!("**Suggested next workflow:** `{nw}`")
+                } else {
+                    "No further workflows suggested.".to_string()
+                },
+            );
+            return Ok(format_output(&req.output_format, &json_resp, text));
+        }
+
+        let step = &steps[session.current_step];
+        let step_info = build_step_info(session.current_step, step);
+        let json_resp = RunWorkflowResponse {
+            workflow_id: workflow_id.to_string(),
+            action: "start".to_string(),
+            current_step: session.current_step,
+            total_steps: session.total_steps,
+            completed: false,
+            step: Some(step_info),
+            next_workflow: None,
+            message: format!(
+                "Started workflow '{workflow_id}'. Complete the step below, then call with action=next."
+            ),
+        };
+        let text = format!(
+            "## Workflow Started: {wf_id}\n\n\
+             **Description:** {desc}\n\
+             **Agent:** `{agent}`\n\
+             **Progress:** Step {cur}/{total}\n\n\
+             ---\n\n\
+             {step_md}",
+            wf_id = workflow_id,
+            desc = wf_desc,
+            agent = wf_agent,
+            cur = session.current_step + 1,
+            total = session.total_steps,
+            step_md = format_step_markdown(session.current_step, step),
+        );
+        Ok(format_output(&req.output_format, &json_resp, text))
+    }
+
+    async fn run_workflow_next(
+        &self,
+        req: &RunWorkflowRequest,
+        project_dir: &std::path::Path,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let wf_id = if let Some(ref id) = req.workflow_id {
+            id.clone()
+        } else {
+            find_active_session(project_dir).ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    "workflow_id is required (or a session must exist in the project directory)",
+                    None,
+                )
+            })?
+        };
+
+        let mut session = BmadIndex::load_session(project_dir, &wf_id)
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to load session: {e}"), None)
+            })?
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("No active session for workflow '{wf_id}'. Use action=start first."),
+                    None,
+                )
+            })?;
+
+        BmadIndex::advance_session(&mut session, req.step_result.clone())
+            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+
+        BmadIndex::save_session(project_dir, &session).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to save session: {e}"), None)
+        })?;
+
+        let steps = BmadIndex::get_workflow_steps(&wf_id);
+
+        if session.completed {
+            let idx = self.index.read().await;
+            let next_wf = idx
+                .get_workflow(&wf_id)
+                .and_then(|w| w.next_steps.first().copied())
+                .map(String::from);
+            drop(idx);
+
+            let json_resp = RunWorkflowResponse {
+                workflow_id: wf_id.clone(),
+                action: "next".to_string(),
+                current_step: session.current_step,
+                total_steps: session.total_steps,
+                completed: true,
+                step: None,
+                next_workflow: next_wf.clone(),
+                message: "Workflow completed!".to_string(),
+            };
+            let text = format!(
+                "## Workflow Completed: {wf_id}\n\n\
+                 All {total} steps finished.\n\n\
+                 {next}",
+                total = session.total_steps,
+                next = if let Some(ref nw) = next_wf {
+                    format!(
+                        "**Suggested next workflow:** `{nw}`\n\
+                         Use `bmad_run_workflow` with `action: \"start\"` and `workflow_id: \"{nw}\"` to continue."
+                    )
+                } else {
+                    "No further workflows suggested.".to_string()
+                },
+            );
+            return Ok(format_output(&req.output_format, &json_resp, text));
+        }
+
+        let step = steps.and_then(|s| s.get(session.current_step));
+
+        let (step_info, step_md) = if let Some(step) = step {
+            (
+                Some(build_step_info(session.current_step, step)),
+                format_step_markdown(session.current_step, step),
+            )
+        } else {
+            (None, "Step data not available.".to_string())
+        };
+
+        let json_resp = RunWorkflowResponse {
+            workflow_id: wf_id.clone(),
+            action: "next".to_string(),
+            current_step: session.current_step,
+            total_steps: session.total_steps,
+            completed: false,
+            step: step_info,
+            next_workflow: None,
+            message: format!(
+                "Advanced to step {}/{}.",
+                session.current_step + 1,
+                session.total_steps
+            ),
+        };
+        let text = format!(
+            "## Workflow: {wf_id}\n\n\
+             **Progress:** Step {cur}/{total}\n\n\
+             ---\n\n\
+             {step_md}",
+            cur = session.current_step + 1,
+            total = session.total_steps,
+        );
+        Ok(format_output(&req.output_format, &json_resp, text))
+    }
+
+    async fn run_workflow_status(
+        &self,
+        req: &RunWorkflowRequest,
+        project_dir: &std::path::Path,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let wf_id = req
+            .workflow_id
+            .as_deref()
+            .map(String::from)
+            .or_else(|| find_active_session(project_dir));
+
+        let wf_id = wf_id.ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                "workflow_id is required (or a session must exist in the project directory)",
+                None,
+            )
+        })?;
+
+        let session = BmadIndex::load_session(project_dir, &wf_id)
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to load session: {e}"), None)
+            })?
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("No session found for workflow '{wf_id}'. Use action=start first."),
+                    None,
+                )
+            })?;
+
+        let steps = BmadIndex::get_workflow_steps(&wf_id);
+        let step = if !session.completed {
+            steps.and_then(|s| s.get(session.current_step))
+        } else {
+            None
+        };
+
+        let step_info = step.map(|s| build_step_info(session.current_step, s));
+
+        let json_resp = RunWorkflowResponse {
+            workflow_id: wf_id.clone(),
+            action: "status".to_string(),
+            current_step: session.current_step,
+            total_steps: session.total_steps,
+            completed: session.completed,
+            step: step_info,
+            next_workflow: None,
+            message: if session.completed {
+                "Workflow completed.".to_string()
+            } else {
+                format!(
+                    "In progress: step {}/{}.",
+                    session.current_step + 1,
+                    session.total_steps
+                )
+            },
+        };
+
+        let status_label = if session.completed {
+            "Completed"
+        } else {
+            "In Progress"
+        };
+
+        let mut text = format!(
+            "## Workflow Status: {wf_id}\n\n\
+             **Status:** {status_label}\n\
+             **Progress:** {cur}/{total} steps\n\
+             **Started:** {started}\n\
+             **Last updated:** {updated}\n",
+            cur = session.current_step,
+            total = session.total_steps,
+            started = session.started_at,
+            updated = session.updated_at,
+        );
+
+        if !session.completed
+            && let Some(s) = step
+        {
+            text.push_str(&format!(
+                "\n---\n\n### Current Step\n\n{}",
+                format_step_markdown(session.current_step, s),
+            ));
+        }
+
+        Ok(format_output(&req.output_format, &json_resp, text))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers for workflow steps
+// ---------------------------------------------------------------------------
+
+fn build_step_info(index: usize, step: &WorkflowStep) -> RunWorkflowStepInfo {
+    RunWorkflowStepInfo {
+        number: index + 1,
+        title: step.title.to_string(),
+        instructions: step.instructions.to_string(),
+        expected_output: step.expected_output.to_string(),
+        agent_guidance: step.agent_guidance.to_string(),
+    }
+}
+
+fn format_step_markdown(index: usize, step: &WorkflowStep) -> String {
+    format!(
+        "### Step {num}: {title}\n\n\
+         **Instructions:** {instructions}\n\n\
+         **Expected output:** {expected_output}\n\n\
+         **Agent guidance:** {agent_guidance}",
+        num = index + 1,
+        title = step.title,
+        instructions = step.instructions,
+        expected_output = step.expected_output,
+        agent_guidance = step.agent_guidance,
+    )
+}
+
+/// Find the most recently modified session file in the project's _bmad/sessions/ directory.
+fn find_active_session(project_dir: &std::path::Path) -> Option<String> {
+    let sessions_dir = project_dir.join("_bmad").join("sessions");
+    if !sessions_dir.is_dir() {
+        return None;
+    }
+
+    std::fs::read_dir(&sessions_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
+        .and_then(|e| {
+            e.path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        })
+}
+
+
+/// Convert days since Unix epoch to (year, month, day).
+fn civil_from_days(mut z: i64) -> (i64, u32, u32) {
+    z += 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 #[tool_handler]
 impl ServerHandler for BmadServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                "BMad Method MCP Server",
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(
-                "BMad Method MCP Server provides workflow guidance for the Build More Architect \
-                 Dreams methodology. Use the tools to look up workflows, determine next steps \
-                 for each phase, and find the right planning track for your project. Use \
-                 bmad_next_step with a description of your project state to get a personalized \
-                 recommendation, or bmad_help to ask questions about agents, phases, tracks, \
-                 and workflows. The server knows about all phases (Analysis, Planning, \
-                 Solutioning, Implementation), all three planning tracks (Quick Flow, BMad \
-                 Method, Enterprise), and all default agents and their workflows."
-                    .to_string(),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_resources_subscribe()
+                .build(),
+        )
+        .with_server_info(Implementation::new(
+            "BMad Method MCP Server",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(
+            "BMad Method MCP Server provides workflow guidance for the Build More Architect \
+             Dreams methodology. Use the tools to look up workflows, determine next steps \
+             for each phase, and find the right planning track for your project. Use \
+             bmad_next_step with a description of your project state to get a personalized \
+             recommendation, or bmad_help to ask questions about agents, phases, tracks, \
+             and workflows. Resources are available at bmad:// URIs for browsing \
+             documentation on phases, workflows, agents, and tracks."
+                .to_string(),
+        )
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+        let idx = self.index.read().await;
+        let mut resources = Vec::new();
+
+        // Full docs resource
+        resources.push(
+            RawResource::new("bmad://docs", "BMad Method Documentation")
+                .with_description("Complete BMad Method documentation")
+                .with_mime_type("text/plain")
+                .no_annotation(),
+        );
+
+        // Phase resources
+        for phase in Phase::all() {
+            let uri = format!("bmad://phases/{}", phase.name().to_lowercase());
+            resources.push(
+                RawResource::new(&uri, format!("Phase {}: {}", phase.number(), phase.name()))
+                    .with_description(phase.description())
+                    .with_mime_type("text/markdown")
+                    .no_annotation(),
+            );
+        }
+
+        // Track resources
+        for track in Track::all() {
+            let uri = format!(
+                "bmad://tracks/{}",
+                track.name().to_lowercase().replace(' ', "-")
+            );
+            resources.push(
+                RawResource::new(&uri, format!("{} Track", track.name()))
+                    .with_description(track.description())
+                    .with_mime_type("text/markdown")
+                    .no_annotation(),
+            );
+        }
+
+        // Workflow resources
+        for wf_id in idx.all_workflow_ids() {
+            let uri = format!("bmad://workflows/{wf_id}");
+            let desc = idx
+                .get_workflow(wf_id)
+                .map(|w| w.description)
+                .unwrap_or("BMad workflow");
+            resources.push(
+                RawResource::new(&uri, wf_id)
+                    .with_description(desc)
+                    .with_mime_type("text/markdown")
+                    .no_annotation(),
+            );
+        }
+
+        // Agent resources
+        for agent in idx.all_agents() {
+            let uri = format!("bmad://agents/{}", agent.skill_id);
+            resources.push(
+                RawResource::new(&uri, agent.name)
+                    .with_description(format!("{} — {}", agent.persona, agent.skill_id))
+                    .with_mime_type("text/markdown")
+                    .no_annotation(),
+            );
+        }
+
+        Ok(ListResourcesResult {
+            resources,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
+        let templates = vec![
+            RawResourceTemplate::new("bmad://phases/{phase}", "Phase by name")
+                .with_description(
+                    "BMad Method phase details. Use: analysis, planning, solutioning, implementation",
+                )
+                .with_mime_type("text/markdown")
+                .no_annotation(),
+            RawResourceTemplate::new("bmad://workflows/{workflow_id}", "Workflow by ID")
+                .with_description("BMad Method workflow details by skill ID")
+                .with_mime_type("text/markdown")
+                .no_annotation(),
+            RawResourceTemplate::new("bmad://agents/{agent_id}", "Agent by skill ID")
+                .with_description("BMad Method agent details by skill ID")
+                .with_mime_type("text/markdown")
+                .no_annotation(),
+            RawResourceTemplate::new("bmad://tracks/{track}", "Track by name")
+                .with_description(
+                    "BMad Method planning track details. Use: quick-flow, bmad-method, enterprise",
+                )
+                .with_mime_type("text/markdown")
+                .no_annotation(),
+        ];
+
+        Ok(ListResourceTemplatesResult {
+            resource_templates: templates,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+        let uri = &request.uri;
+        let idx = self.index.read().await;
+
+        let content = if uri == "bmad://docs" {
+            idx.raw_docs().to_string()
+        } else if let Some(phase_name) = uri.strip_prefix("bmad://phases/") {
+            let phase = parse_phase(phase_name).ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("Unknown phase '{phase_name}'. Valid: analysis, planning, solutioning, implementation"),
+                    None,
+                )
+            })?;
+            let workflows = idx.get_phase_workflows(phase);
+            let wf_details: Vec<String> = workflows
+                .iter()
+                .filter_map(|id| {
+                    idx.get_workflow(id).map(|wf| {
+                        format!(
+                            "- **`{}`** — {}\n  Agent: `{}` | Produces: {}",
+                            wf.id, wf.description, wf.agent, wf.produces
+                        )
+                    })
+                })
+                .collect();
+            format!(
+                "# Phase {}: {}\n\n{}\n\n## Workflows\n\n{}",
+                phase.number(),
+                phase.name(),
+                phase.description(),
+                if wf_details.is_empty() {
+                    "No workflows in this phase.".to_string()
+                } else {
+                    wf_details.join("\n")
+                }
             )
+        } else if let Some(wf_id) = uri.strip_prefix("bmad://workflows/") {
+            let wf = idx.get_workflow(wf_id).ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("Workflow '{wf_id}' not found"),
+                    None,
+                )
+            })?;
+            let tracks: Vec<&str> = wf.tracks.iter().map(|t| t.name()).collect();
+            format!(
+                "# {id}\n\n\
+                 **Description:** {desc}\n\
+                 **Phase:** {phase} (Phase {num})\n\
+                 **Agent:** {agent}\n\
+                 **Produces:** {produces}\n\
+                 **Prerequisites:** {prereqs}\n\
+                 **Next steps:** {next}\n\
+                 **Tracks:** {tracks}",
+                id = wf.id,
+                desc = wf.description,
+                phase = wf.phase.name(),
+                num = wf.phase.number(),
+                agent = wf.agent,
+                produces = wf.produces,
+                prereqs = if wf.prerequisites.is_empty() {
+                    "none".to_string()
+                } else {
+                    wf.prerequisites.join(", ")
+                },
+                next = if wf.next_steps.is_empty() {
+                    "none".to_string()
+                } else {
+                    wf.next_steps.join(", ")
+                },
+                tracks = tracks.join(", "),
+            )
+        } else if let Some(agent_id) = uri.strip_prefix("bmad://agents/") {
+            let agent = idx.get_agent(agent_id).ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("Agent '{agent_id}' not found"),
+                    None,
+                )
+            })?;
+            let mut lines = vec![format!(
+                "# {name}\n\n\
+                 **Skill ID:** `{skill_id}`\n\
+                 **Persona:** {persona}\n\n\
+                 ## Primary Workflows\n",
+                name = agent.name,
+                skill_id = agent.skill_id,
+                persona = agent.persona,
+            )];
+            for wf_id in &agent.primary_workflows {
+                if let Some(wf) = idx.get_workflow(wf_id) {
+                    let tracks: Vec<&str> = wf.tracks.iter().map(|t| t.name()).collect();
+                    lines.push(format!(
+                        "- **`{}`** — {}\n  Phase: {} | Produces: {} | Tracks: {}",
+                        wf.id,
+                        wf.description,
+                        wf.phase.name(),
+                        wf.produces,
+                        tracks.join(", "),
+                    ));
+                } else {
+                    lines.push(format!("- `{wf_id}` — (not found in index)"));
+                }
+            }
+            lines.join("\n")
+        } else if let Some(track_name) = uri.strip_prefix("bmad://tracks/") {
+            let normalized = track_name.replace('-', " ");
+            let track = parse_track(&normalized).ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("Unknown track '{track_name}'. Valid: quick-flow, bmad-method, enterprise"),
+                    None,
+                )
+            })?;
+            let wfs = idx.get_track_workflows(track);
+            let mut lines = vec![format!(
+                "# {} Track\n\n{}\n\n## Phases\n\n{}\n\n## Workflows\n",
+                track.name(),
+                track.description(),
+                track
+                    .phases()
+                    .iter()
+                    .map(|p| format!("- Phase {}: {}", p.number(), p.name()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )];
+            for wf in &wfs {
+                lines.push(format!(
+                    "- **`{}`** — {} (Phase {}: {})",
+                    wf.id,
+                    wf.description,
+                    wf.phase.number(),
+                    wf.phase.name(),
+                ));
+            }
+            lines.join("\n")
+        } else {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("Unknown resource URI: {uri}"),
+                None,
+            ));
+        };
+
+        Ok(ReadResourceResult::new(vec![
+            ResourceContents::text(content, uri.clone()).with_mime_type("text/markdown"),
+        ]))
+    }
+
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        let uri = request.uri;
+        tracing::info!(%uri, "client subscribed to resource");
+        self.subscriptions
+            .write()
+            .await
+            .push((uri, context.peer.clone()));
+        Ok(())
+    }
+
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        let uri = &request.uri;
+        tracing::info!(%uri, "client unsubscribed from resource");
+        self.subscriptions.write().await.retain(|(u, _)| u != uri);
+        Ok(())
     }
 }
 

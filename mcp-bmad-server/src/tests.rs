@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rmcp::ServiceExt;
 use rmcp::handler::server::wrapper::Parameters;
 use tokio::sync::RwLock;
 
@@ -829,6 +830,8 @@ async fn scaffold_quick_flow() {
         .bmad_scaffold(Parameters(ScaffoldRequest {
             track: "quick_flow".to_string(),
             project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            project_name: None,
+            author: None,
             output_format: None,
         }))
         .await;
@@ -853,6 +856,8 @@ async fn scaffold_bmad_method() {
         .bmad_scaffold(Parameters(ScaffoldRequest {
             track: "bmad_method".to_string(),
             project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            project_name: None,
+            author: None,
             output_format: None,
         }))
         .await;
@@ -877,6 +882,8 @@ async fn scaffold_enterprise() {
         .bmad_scaffold(Parameters(ScaffoldRequest {
             track: "enterprise".to_string(),
             project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            project_name: None,
+            author: None,
             output_format: None,
         }))
         .await;
@@ -898,6 +905,8 @@ async fn scaffold_unknown_track_returns_error() {
         .bmad_scaffold(Parameters(ScaffoldRequest {
             track: "nonexistent_track".to_string(),
             project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            project_name: None,
+            author: None,
             output_format: None,
         }))
         .await;
@@ -911,6 +920,8 @@ async fn scaffold_nonexistent_dir_returns_error() {
         .bmad_scaffold(Parameters(ScaffoldRequest {
             track: "bmad_method".to_string(),
             project_dir: Some("/nonexistent/scaffold/test/dir".to_string()),
+            project_name: None,
+            author: None,
             output_format: None,
         }))
         .await;
@@ -927,6 +938,8 @@ async fn scaffold_then_project_state_detects_files() {
         .bmad_scaffold(Parameters(ScaffoldRequest {
             track: "bmad_method".to_string(),
             project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            project_name: None,
+            author: None,
             output_format: None,
         }))
         .await;
@@ -957,6 +970,8 @@ async fn scaffold_track_aliases_work() {
             .bmad_scaffold(Parameters(ScaffoldRequest {
                 track: track_name.to_string(),
                 project_dir: Some(tmp.path().to_string_lossy().to_string()),
+                project_name: None,
+                author: None,
                 output_format: None,
             }))
             .await;
@@ -966,6 +981,38 @@ async fn scaffold_track_aliases_work() {
             "track alias '{track_name}' should work"
         );
     }
+}
+
+#[tokio::test]
+async fn scaffold_with_template_vars_substitutes_into_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = server();
+    let result = srv
+        .bmad_scaffold(Parameters(ScaffoldRequest {
+            track: "bmad_method".to_string(),
+            project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            project_name: Some("Widget App".to_string()),
+            author: Some("Bob".to_string()),
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("BMad Project Scaffolded"), "should scaffold successfully");
+
+    // Verify template vars were substituted in generated files
+    let ctx = std::fs::read_to_string(
+        tmp.path().join("_bmad-output/project-context.md"),
+    )
+    .unwrap();
+    assert!(ctx.contains("Widget App"), "project_name should be substituted");
+    assert!(ctx.contains("Bob"), "author should be substituted");
+    assert!(!ctx.contains("{{project_name}}"), "placeholder should be replaced");
+
+    let prd = std::fs::read_to_string(
+        tmp.path().join("_bmad-output/planning-artifacts/PRD.md"),
+    )
+    .unwrap();
+    assert!(prd.contains("Widget App"), "project_name should appear in PRD");
 }
 
 // =========================================================================
@@ -1115,4 +1162,254 @@ async fn json_default_is_markdown() {
         "default output should be markdown, not JSON"
     );
     assert!(text.contains("bmad-create-prd"), "should still contain workflow id");
+}
+
+// =========================================================================
+// MCP Resource endpoints (integration tests via duplex transport)
+// =========================================================================
+
+/// Spin up a BmadServer over a duplex transport and return the client handle.
+async fn resource_client() -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    let index = Arc::new(RwLock::new(BmadIndex::build()));
+    let (server_transport, client_transport) = tokio::io::duplex(65536);
+    tokio::spawn(async move {
+        let server = BmadServer::new(index);
+        let svc = server.serve(server_transport).await.unwrap();
+        svc.waiting().await.unwrap();
+    });
+    ().serve(client_transport).await.unwrap()
+}
+
+#[tokio::test]
+async fn resource_list_contains_docs_and_phases() {
+    let client = resource_client().await;
+    let result = client.list_all_resources().await.unwrap();
+
+    // Should contain bmad://docs
+    assert!(
+        result.iter().any(|r| r.uri == "bmad://docs"),
+        "should list bmad://docs resource"
+    );
+
+    // Should contain all 4 phases
+    for phase in ["analysis", "planning", "solutioning", "implementation"] {
+        let uri = format!("bmad://phases/{phase}");
+        assert!(
+            result.iter().any(|r| r.uri == uri),
+            "should list phase resource: {uri}"
+        );
+    }
+
+    // Should contain all 3 tracks
+    for track in ["quick-flow", "bmad-method", "enterprise"] {
+        let uri = format!("bmad://tracks/{track}");
+        assert!(
+            result.iter().any(|r| r.uri == uri),
+            "should list track resource: {uri}"
+        );
+    }
+
+    // Should contain workflow resources
+    assert!(
+        result.iter().any(|r| r.uri == "bmad://workflows/bmad-create-prd"),
+        "should list workflow resources"
+    );
+
+    // Should contain agent resources
+    assert!(
+        result.iter().any(|r| r.uri.starts_with("bmad://agents/")),
+        "should list agent resources"
+    );
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_list_templates() {
+    let client = resource_client().await;
+    let result = client
+        .list_resource_templates(None)
+        .await
+        .unwrap();
+
+    assert_eq!(result.resource_templates.len(), 4, "should have 4 resource templates");
+
+    let uris: Vec<&str> = result
+        .resource_templates
+        .iter()
+        .map(|t| t.uri_template.as_str())
+        .collect();
+    assert!(uris.contains(&"bmad://phases/{phase}"));
+    assert!(uris.contains(&"bmad://workflows/{workflow_id}"));
+    assert!(uris.contains(&"bmad://agents/{agent_id}"));
+    assert!(uris.contains(&"bmad://tracks/{track}"));
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_read_docs() {
+    let client = resource_client().await;
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams {
+            uri: "bmad://docs".to_string(),
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.contents.len(), 1);
+    match &result.contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { uri, text, .. } => {
+            assert_eq!(uri, "bmad://docs");
+            assert!(!text.is_empty(), "docs content should not be empty");
+            assert!(text.contains("BMad"), "docs should mention BMad");
+        }
+        _ => panic!("expected text resource contents"),
+    }
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_read_phase() {
+    let client = resource_client().await;
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams {
+            uri: "bmad://phases/planning".to_string(),
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.contents.len(), 1);
+    match &result.contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+            assert!(text.contains("Planning"), "should describe Planning phase");
+            assert!(text.contains("Workflows"), "should list workflows");
+        }
+        _ => panic!("expected text resource contents"),
+    }
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_read_workflow() {
+    let client = resource_client().await;
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams {
+            uri: "bmad://workflows/bmad-create-prd".to_string(),
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.contents.len(), 1);
+    match &result.contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+            assert!(text.contains("bmad-create-prd"), "should contain workflow id");
+            assert!(text.contains("Phase"), "should mention phase");
+            assert!(text.contains("Agent"), "should mention agent");
+        }
+        _ => panic!("expected text resource contents"),
+    }
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_read_agent() {
+    let client = resource_client().await;
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams {
+            uri: "bmad://agents/bmad-pm".to_string(),
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.contents.len(), 1);
+    match &result.contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+            assert!(text.contains("bmad-pm"), "should contain agent skill id");
+            assert!(text.contains("Workflows"), "should list workflows");
+        }
+        _ => panic!("expected text resource contents"),
+    }
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_read_track() {
+    let client = resource_client().await;
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams {
+            uri: "bmad://tracks/bmad-method".to_string(),
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.contents.len(), 1);
+    match &result.contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+            assert!(text.contains("BMad Method"), "should describe BMad Method track");
+            assert!(text.contains("Phases"), "should list phases");
+            assert!(text.contains("Workflows"), "should list workflows");
+        }
+        _ => panic!("expected text resource contents"),
+    }
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_read_unknown_returns_error() {
+    let client = resource_client().await;
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams {
+            uri: "bmad://nonexistent/foo".to_string(),
+            meta: None,
+        })
+        .await;
+
+    assert!(result.is_err(), "reading unknown URI should return error");
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_read_unknown_workflow_returns_error() {
+    let client = resource_client().await;
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams {
+            uri: "bmad://workflows/nonexistent-workflow".to_string(),
+            meta: None,
+        })
+        .await;
+
+    assert!(result.is_err(), "reading unknown workflow should return error");
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_subscribe_and_unsubscribe() {
+    let client = resource_client().await;
+
+    // Subscribe should succeed
+    client
+        .subscribe(rmcp::model::SubscribeRequestParams::new("bmad://docs"))
+        .await
+        .unwrap();
+
+    // Unsubscribe should succeed
+    client
+        .unsubscribe(rmcp::model::UnsubscribeRequestParams::new("bmad://docs"))
+        .await
+        .unwrap();
+
+    client.cancel().await.unwrap();
 }
