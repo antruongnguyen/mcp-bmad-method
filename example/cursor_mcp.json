@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "bmad-method": {
+      "command": "/path/to/mcp-bmad-server"
+    }
+  }
+}

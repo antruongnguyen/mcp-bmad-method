@@ -38,30 +38,52 @@ RUST_LOG=debug cargo run
 cargo clippy
 ```
 
+## Release Binary
+
+Build an optimized release binary:
+
+```sh
+cargo build --release
+```
+
+The binary is at `target/release/mcp-bmad-server`. It communicates over stdio so it can be used directly with any MCP client.
+
+## Docker
+
+Build and run via Docker:
+
+```sh
+docker build -t mcp-bmad-server .
+docker run -i mcp-bmad-server
+```
+
 ## MCP Client Configuration
+
+Ready-to-use config snippets are in the `example/` directory.
 
 ### Claude Desktop
 
-Add to your `claude_desktop_config.json`:
+Add to your `claude_desktop_config.json` (see `example/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "bmad-method": {
-      "command": "cargo",
-      "args": ["run", "--manifest-path", "/path/to/mcp-bmad-method/Cargo.toml"]
+      "command": "/path/to/mcp-bmad-server"
     }
   }
 }
 ```
 
-Or with a pre-built binary:
+### Cursor
+
+Add to your MCP settings (see `example/cursor_mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "bmad-method": {
-      "command": "/path/to/mcp-bmad-method/target/release/mcp-bmad-server"
+      "command": "/path/to/mcp-bmad-server"
     }
   }
 }

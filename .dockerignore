@@ -1,0 +1,6 @@
+target/
+agents/
+.github/
+.git/
+example/
+*.md
