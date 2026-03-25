@@ -2,7 +2,7 @@ mod bmad_index;
 
 use std::sync::Arc;
 
-use bmad_index::{BmadIndex, Phase, Track};
+use bmad_index::{BmadIndex, Phase, SprintGuideResult, Track};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -138,11 +138,6 @@ fn parse_track(s: &str) -> Option<Track> {
         "enterprise" => Some(Track::Enterprise),
         _ => None,
     }
-}
-
-/// Check whether a lowercased text contains any of the given keyword phrases.
-fn has_keywords(text: &str, keywords: &[&str]) -> bool {
-    keywords.iter().any(|kw| text.contains(kw))
 }
 
 /// Default cache directory for fetched docs.
@@ -692,127 +687,13 @@ impl BmadServer {
         &self,
         Parameters(req): Parameters<SprintGuideRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let state = req.sprint_state.to_lowercase();
-
-        // Determine cycle state from keywords in the sprint_state description.
-        // Priority order matters: check most specific conditions first.
-
-        let (current_step, agent_to_invoke, workflow_to_run, rationale, after_this) =
-            if has_keywords(&state, &["no sprint", "no plan", "not started", "beginning", "brand new", "just started implementation"]) {
-                (
-                    "Sprint initialization",
-                    "bmad-agent-sm",
-                    "bmad-sprint-planning",
-                    "No sprint plan detected. The Scrum Master needs to initialize sprint tracking \
-                     (sprint-status.yaml) before stories can be created.",
-                    "Once sprint planning is complete, the SM will create the first story file \
-                     for the first epic.",
-                )
-            } else if has_keywords(&state, &["all stories in epic done", "all stories done", "all stories complete",
-                "epic complete", "epic done", "epic finished", "stories in epic complete",
-                "all stories reviewed", "last story reviewed", "last story done",
-                "entire epic implemented and reviewed"]) {
-                (
-                    "Epic retrospective",
-                    "bmad-agent-sm",
-                    "bmad-retrospective",
-                    "All stories in the current epic are complete. The Scrum Master should run a \
-                     retrospective to review what went well, what didn't, and capture lessons \
-                     before moving to the next epic.",
-                    "After the retrospective, if more epics remain, the SM will create the first \
-                     story file for the next epic. If all epics are done, the project is complete.",
-                )
-            } else if has_keywords(&state, &["implemented", "built", "coded", "developed", "implementation done",
-                "implementation complete", "code complete", "code done"])
-                && !has_keywords(&state, &["reviewed", "review done", "review complete", "passed review",
-                    "code review done", "code review complete"]) {
-                (
-                    "Code review",
-                    "bmad-agent-dev",
-                    "bmad-code-review",
-                    "The story has been implemented but not yet reviewed. The Developer should \
-                     run the code review workflow to validate the implementation quality, check \
-                     for edge cases, and ensure the story acceptance criteria are met.",
-                    "After the code review passes, if more stories remain in the current epic, \
-                     the SM will create the next story file. If this was the last story in the \
-                     epic, the SM will run a retrospective.",
-                )
-            } else if has_keywords(&state, &["story file created", "story created", "story file exists",
-                "story ready", "story prepared", "story written", "has story file",
-                "story file done", "story defined"])
-                && !has_keywords(&state, &["implemented", "built", "coded", "developed",
-                    "implementation done", "code complete"]) {
-                (
-                    "Story implementation",
-                    "bmad-agent-dev",
-                    "bmad-dev-story",
-                    "A story file has been created but the story has not been implemented yet. \
-                     The Developer should implement the story according to its acceptance criteria \
-                     and technical requirements.",
-                    "After implementation, the Developer will run a code review on the completed \
-                     story.",
-                )
-            } else if has_keywords(&state, &["reviewed", "review done", "review complete", "passed review",
-                "code review done", "code review complete"])
-                && has_keywords(&state, &["more stories", "stories remain", "next story", "remaining stories",
-                    "not all stories"]) {
-                (
-                    "Create next story",
-                    "bmad-agent-sm",
-                    "bmad-create-story",
-                    "The current story has been reviewed and more stories remain in the epic. \
-                     The Scrum Master should create the next story file to continue the cycle.",
-                    "After the story file is created, the Developer will implement it, then \
-                     review it. This cycle continues until all stories in the epic are done.",
-                )
-            } else if has_keywords(&state, &["no story", "need story", "no current story",
-                "story not created", "need to create story", "waiting for story"]) {
-                (
-                    "Create story",
-                    "bmad-agent-sm",
-                    "bmad-create-story",
-                    "No current story file exists. The Scrum Master needs to create the next \
-                     story file from the epic's story list so the Developer can implement it.",
-                    "After the story file is created, the Developer will implement the story, \
-                     then run a code review.",
-                )
-            } else if has_keywords(&state, &["retrospective done", "retro done", "retro complete",
-                "retrospective complete"]) {
-                (
-                    "Start next epic",
-                    "bmad-agent-sm",
-                    "bmad-create-story",
-                    "The retrospective for the previous epic is complete. The Scrum Master should \
-                     create the first story file for the next epic to begin the build cycle again.",
-                    "After the story file is created, the Developer will implement it. The \
-                     SM creates story -> DEV implements -> DEV reviews cycle continues for \
-                     each story in the new epic.",
-                )
-            } else {
-                // Fallback: try to give reasonable guidance based on any partial signals
-                if has_keywords(&state, &["sprint plan", "sprint status", "sprint-status"]) {
-                    (
-                        "Create story",
-                        "bmad-agent-sm",
-                        "bmad-create-story",
-                        "A sprint plan exists. The Scrum Master should create the next story file \
-                         so the Developer can begin implementation.",
-                        "After the story file is created, the Developer will implement it, \
-                         then run a code review.",
-                    )
-                } else {
-                    (
-                        "Sprint initialization",
-                        "bmad-agent-sm",
-                        "bmad-sprint-planning",
-                        "Could not determine the exact cycle state from the description provided. \
-                         Starting from the beginning: the Scrum Master should initialize sprint \
-                         tracking. Provide more detail about your sprint state for more specific guidance.",
-                        "Once sprint planning is complete, the SM will create story files and the \
-                         DEV will implement and review them in sequence.",
-                    )
-                }
-            };
+        let SprintGuideResult {
+            current_step,
+            agent_to_invoke,
+            workflow_to_run,
+            rationale,
+            after_this,
+        } = BmadIndex::sprint_guide(&req.sprint_state);
 
         let text = format!(
             "## Sprint Guide\n\n\

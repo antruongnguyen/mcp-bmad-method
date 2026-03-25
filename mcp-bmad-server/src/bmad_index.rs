@@ -159,6 +159,15 @@ pub struct ReadinessResult {
     pub next_action: String,
 }
 
+/// Result from sprint guide cycle detection.
+pub struct SprintGuideResult {
+    pub current_step: &'static str,
+    pub agent_to_invoke: &'static str,
+    pub workflow_to_run: &'static str,
+    pub rationale: &'static str,
+    pub after_this: &'static str,
+}
+
 /// The in-memory index of all BMad Method content.
 pub struct BmadIndex {
     workflows: HashMap<&'static str, Workflow>,
@@ -517,6 +526,210 @@ impl BmadIndex {
             missing_artifacts: missing,
             warnings,
             next_action,
+        }
+    }
+
+    /// Determine the current step in the BMad build cycle from a free-text sprint state.
+    ///
+    /// The cycle is: SM creates story → DEV implements → DEV reviews → repeat.
+    /// After all stories in an epic, SM runs retrospective. Then move to next epic.
+    pub fn sprint_guide(sprint_state: &str) -> SprintGuideResult {
+        let state = sprint_state.to_lowercase();
+
+        // Simple keyword presence check.
+        let has = |keywords: &[&str]| -> bool { keywords.iter().any(|kw| state.contains(kw)) };
+
+        // Check if a keyword is present AND not preceded by a negation word.
+        // E.g. "not yet implemented" should NOT count as affirming "implemented".
+        let has_affirmed = |keywords: &[&str]| -> bool {
+            const NEGATIONS: &[&str] = &["not ", "not yet ", "no ", "hasn't ", "hasn't been ", "without ", "isn't "];
+            keywords.iter().any(|kw| {
+                if let Some(pos) = state.find(kw) {
+                    let prefix = &state[..pos];
+                    !NEGATIONS.iter().any(|neg| prefix.ends_with(neg))
+                } else {
+                    false
+                }
+            })
+        };
+
+        if has(&[
+            "no sprint",
+            "no plan",
+            "not started",
+            "beginning",
+            "brand new",
+            "just started implementation",
+        ]) {
+            SprintGuideResult {
+                current_step: "Sprint initialization",
+                agent_to_invoke: "bmad-agent-sm",
+                workflow_to_run: "bmad-sprint-planning",
+                rationale: "No sprint plan detected. The Scrum Master needs to initialize sprint \
+                    tracking (sprint-status.yaml) before stories can be created.",
+                after_this: "Once sprint planning is complete, the SM will create the first story \
+                    file for the first epic.",
+            }
+        } else if has(&[
+            "all stories in epic done",
+            "all stories done",
+            "all stories complete",
+            "epic complete",
+            "epic done",
+            "epic finished",
+            "stories in epic complete",
+            "all stories reviewed",
+            "last story reviewed",
+            "last story done",
+            "entire epic implemented and reviewed",
+        ]) {
+            SprintGuideResult {
+                current_step: "Epic retrospective",
+                agent_to_invoke: "bmad-agent-sm",
+                workflow_to_run: "bmad-retrospective",
+                rationale: "All stories in the current epic are complete. The Scrum Master should \
+                    run a retrospective to review what went well, what didn't, and capture \
+                    lessons before moving to the next epic.",
+                after_this: "After the retrospective, if more epics remain, the SM will create \
+                    the first story file for the next epic. If all epics are done, the project \
+                    is complete.",
+            }
+        } else if has_affirmed(&[
+            "implemented",
+            "built",
+            "coded",
+            "developed",
+            "implementation done",
+            "implementation complete",
+            "code complete",
+            "code done",
+        ]) && !has_affirmed(&[
+            "reviewed",
+            "review done",
+            "review complete",
+            "passed review",
+            "code review done",
+            "code review complete",
+        ]) {
+            SprintGuideResult {
+                current_step: "Code review",
+                agent_to_invoke: "bmad-agent-dev",
+                workflow_to_run: "bmad-code-review",
+                rationale: "The story has been implemented but not yet reviewed. The Developer \
+                    should run the code review workflow to validate the implementation quality, \
+                    check for edge cases, and ensure the story acceptance criteria are met.",
+                after_this: "After the code review passes, if more stories remain in the current \
+                    epic, the SM will create the next story file. If this was the last story in \
+                    the epic, the SM will run a retrospective.",
+            }
+        } else if has(&[
+            "story file created",
+            "story created",
+            "story file exists",
+            "story ready",
+            "story prepared",
+            "story written",
+            "has story file",
+            "story file done",
+            "story defined",
+        ]) && !has_affirmed(&[
+            "implemented",
+            "built",
+            "coded",
+            "developed",
+            "implementation done",
+            "code complete",
+        ]) {
+            SprintGuideResult {
+                current_step: "Story implementation",
+                agent_to_invoke: "bmad-agent-dev",
+                workflow_to_run: "bmad-dev-story",
+                rationale: "A story file has been created but the story has not been implemented \
+                    yet. The Developer should implement the story according to its acceptance \
+                    criteria and technical requirements.",
+                after_this: "After implementation, the Developer will run a code review on the \
+                    completed story.",
+            }
+        } else if has_affirmed(&[
+            "reviewed",
+            "review done",
+            "review complete",
+            "passed review",
+            "code review done",
+            "code review complete",
+        ]) && has(&[
+            "more stories",
+            "stories remain",
+            "next story",
+            "remaining stories",
+            "not all stories",
+        ]) {
+            SprintGuideResult {
+                current_step: "Create next story",
+                agent_to_invoke: "bmad-agent-sm",
+                workflow_to_run: "bmad-create-story",
+                rationale: "The current story has been reviewed and more stories remain in the \
+                    epic. The Scrum Master should create the next story file to continue the \
+                    cycle.",
+                after_this: "After the story file is created, the Developer will implement it, \
+                    then review it. This cycle continues until all stories in the epic are done.",
+            }
+        } else if has(&[
+            "no story",
+            "need story",
+            "no current story",
+            "story not created",
+            "need to create story",
+            "waiting for story",
+        ]) {
+            SprintGuideResult {
+                current_step: "Create story",
+                agent_to_invoke: "bmad-agent-sm",
+                workflow_to_run: "bmad-create-story",
+                rationale: "No current story file exists. The Scrum Master needs to create the \
+                    next story file from the epic's story list so the Developer can implement it.",
+                after_this: "After the story file is created, the Developer will implement the \
+                    story, then run a code review.",
+            }
+        } else if has(&[
+            "retrospective done",
+            "retro done",
+            "retro complete",
+            "retrospective complete",
+        ]) {
+            SprintGuideResult {
+                current_step: "Start next epic",
+                agent_to_invoke: "bmad-agent-sm",
+                workflow_to_run: "bmad-create-story",
+                rationale: "The retrospective for the previous epic is complete. The Scrum Master \
+                    should create the first story file for the next epic to begin the build \
+                    cycle again.",
+                after_this: "After the story file is created, the Developer will implement it. \
+                    The SM creates story -> DEV implements -> DEV reviews cycle continues for \
+                    each story in the new epic.",
+            }
+        } else if has(&["sprint plan", "sprint status", "sprint-status"]) {
+            SprintGuideResult {
+                current_step: "Create story",
+                agent_to_invoke: "bmad-agent-sm",
+                workflow_to_run: "bmad-create-story",
+                rationale: "A sprint plan exists. The Scrum Master should create the next story \
+                    file so the Developer can begin implementation.",
+                after_this: "After the story file is created, the Developer will implement it, \
+                    then run a code review.",
+            }
+        } else {
+            SprintGuideResult {
+                current_step: "Sprint initialization",
+                agent_to_invoke: "bmad-agent-sm",
+                workflow_to_run: "bmad-sprint-planning",
+                rationale: "Could not determine the exact cycle state from the description \
+                    provided. Starting from the beginning: the Scrum Master should initialize \
+                    sprint tracking. Provide more detail about your sprint state for more \
+                    specific guidance.",
+                after_this: "Once sprint planning is complete, the SM will create story files \
+                    and the DEV will implement and review them in sequence.",
+            }
         }
     }
 
@@ -1633,5 +1846,125 @@ mod tests {
             Track::BmadMethod,
         );
         assert!(result.ready);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sprint guide
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sprint_guide_story_created_not_implemented() {
+        let r = BmadIndex::sprint_guide("story file created but not yet implemented");
+        assert_eq!(r.current_step, "Story implementation");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-dev");
+        assert_eq!(r.workflow_to_run, "bmad-dev-story");
+    }
+
+    #[test]
+    fn sprint_guide_story_implemented_not_reviewed() {
+        let r = BmadIndex::sprint_guide("story implemented, not reviewed");
+        assert_eq!(r.current_step, "Code review");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-dev");
+        assert_eq!(r.workflow_to_run, "bmad-code-review");
+    }
+
+    #[test]
+    fn sprint_guide_all_stories_in_epic_done() {
+        let r = BmadIndex::sprint_guide("all stories in epic done");
+        assert_eq!(r.current_step, "Epic retrospective");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-sm");
+        assert_eq!(r.workflow_to_run, "bmad-retrospective");
+    }
+
+    #[test]
+    fn sprint_guide_no_sprint_plan() {
+        let r = BmadIndex::sprint_guide("no sprint plan exists yet");
+        assert_eq!(r.current_step, "Sprint initialization");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-sm");
+        assert_eq!(r.workflow_to_run, "bmad-sprint-planning");
+    }
+
+    #[test]
+    fn sprint_guide_reviewed_more_stories_remain() {
+        let r = BmadIndex::sprint_guide("story reviewed, more stories remain in the epic");
+        assert_eq!(r.current_step, "Create next story");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-sm");
+        assert_eq!(r.workflow_to_run, "bmad-create-story");
+    }
+
+    #[test]
+    fn sprint_guide_no_story_exists() {
+        let r = BmadIndex::sprint_guide("no story file, need to create story for epic 2");
+        assert_eq!(r.current_step, "Create story");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-sm");
+        assert_eq!(r.workflow_to_run, "bmad-create-story");
+    }
+
+    #[test]
+    fn sprint_guide_retrospective_done() {
+        let r = BmadIndex::sprint_guide("retrospective done, moving to next epic");
+        assert_eq!(r.current_step, "Start next epic");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-sm");
+        assert_eq!(r.workflow_to_run, "bmad-create-story");
+    }
+
+    #[test]
+    fn sprint_guide_has_sprint_plan_fallback() {
+        let r = BmadIndex::sprint_guide("sprint plan ready, epic 1 queued");
+        assert_eq!(r.current_step, "Create story");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-sm");
+        assert_eq!(r.workflow_to_run, "bmad-create-story");
+    }
+
+    #[test]
+    fn sprint_guide_unknown_state_fallback() {
+        let r = BmadIndex::sprint_guide("some random text with no keywords");
+        assert_eq!(r.current_step, "Sprint initialization");
+        assert_eq!(r.agent_to_invoke, "bmad-agent-sm");
+        assert_eq!(r.workflow_to_run, "bmad-sprint-planning");
+    }
+
+    #[test]
+    fn sprint_guide_case_insensitive() {
+        let r = BmadIndex::sprint_guide("Story File Created but NOT IMPLEMENTED");
+        assert_eq!(r.workflow_to_run, "bmad-dev-story");
+    }
+
+    #[test]
+    fn sprint_guide_epic_complete_synonym() {
+        let r = BmadIndex::sprint_guide("epic 1 complete, all stories reviewed");
+        assert_eq!(r.workflow_to_run, "bmad-retrospective");
+    }
+
+    #[test]
+    fn sprint_guide_coded_not_reviewed() {
+        let r = BmadIndex::sprint_guide("story 3 coded and ready for review");
+        assert_eq!(r.current_step, "Code review");
+        assert_eq!(r.workflow_to_run, "bmad-code-review");
+    }
+
+    #[test]
+    fn sprint_guide_complex_state_description() {
+        // "epic 1 complete" doesn't match "epic complete" (number in between).
+        // "story file created but not yet implemented" properly detects story implementation.
+        let r = BmadIndex::sprint_guide(
+            "epic 1 complete, working on epic 2 story 3, story file created but not yet implemented",
+        );
+        assert_eq!(r.workflow_to_run, "bmad-dev-story");
+    }
+
+    #[test]
+    fn sprint_guide_story_created_for_new_epic() {
+        // Without "epic complete", story creation state is detected properly.
+        let r = BmadIndex::sprint_guide(
+            "working on epic 2 story 3, story file created but not yet implemented",
+        );
+        assert_eq!(r.workflow_to_run, "bmad-dev-story");
+    }
+
+    #[test]
+    fn sprint_guide_not_started() {
+        let r = BmadIndex::sprint_guide("not started yet, brand new project");
+        assert_eq!(r.workflow_to_run, "bmad-sprint-planning");
     }
 }
