@@ -180,6 +180,31 @@ pub struct SprintGuideResult {
     pub after_this: &'static str,
 }
 
+/// Describes where the index docs came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocSource {
+    Embedded,
+    Url(String),
+    Cache(String),
+}
+
+impl std::fmt::Display for DocSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DocSource::Embedded => write!(f, "embedded"),
+            DocSource::Url(url) => write!(f, "url: {url}"),
+            DocSource::Cache(path) => write!(f, "cache: {path}"),
+        }
+    }
+}
+
+/// Result of validating doc content before index rebuild.
+#[derive(Debug)]
+pub struct DocValidationResult {
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
 /// The in-memory index of all BMad Method content.
 pub struct BmadIndex {
     workflows: HashMap<&'static str, Workflow>,
@@ -187,17 +212,25 @@ pub struct BmadIndex {
     core_tools: Vec<CoreTool>,
     phase_workflows: HashMap<Phase, Vec<&'static str>>,
     docs: String,
+    doc_source: DocSource,
+    last_refresh: Option<std::time::Instant>,
+    doc_byte_size: usize,
 }
 
 #[allow(dead_code)]
 impl BmadIndex {
     /// Build the index with the embedded documentation.
     pub fn build() -> Self {
-        Self::build_with_docs(BMAD_DOCS.to_string())
+        Self::build_with_source(BMAD_DOCS.to_string(), DocSource::Embedded)
     }
 
     /// Build the index with custom documentation content.
     pub fn build_with_docs(docs: String) -> Self {
+        Self::build_with_source(docs, DocSource::Embedded)
+    }
+
+    /// Build the index with custom documentation content and source metadata.
+    pub fn build_with_source(docs: String, source: DocSource) -> Self {
         let agents = Self::build_agents();
         let workflows = Self::build_workflows();
         let core_tools = Self::build_core_tools();
@@ -210,13 +243,70 @@ impl BmadIndex {
             phase_workflows.entry(wf.phase).or_default().push(id);
         }
 
+        let doc_byte_size = docs.len();
+
         Self {
             workflows,
             agents,
             core_tools,
             phase_workflows,
             docs,
+            doc_source: source,
+            last_refresh: Some(std::time::Instant::now()),
+            doc_byte_size,
         }
+    }
+
+    /// Validate that documentation content has the minimum expected structure.
+    ///
+    /// Checks for at least the 4 phase names and a few known workflow ids.
+    pub fn validate_docs(docs: &str) -> DocValidationResult {
+        let mut errors = Vec::new();
+        let lower = docs.to_lowercase();
+
+        // Check for the 4 phase names
+        const EXPECTED_PHASES: &[&str] = &["analysis", "planning", "solutioning", "implementation"];
+        for phase in EXPECTED_PHASES {
+            if !lower.contains(phase) {
+                errors.push(format!("missing expected phase name: {phase}"));
+            }
+        }
+
+        // Check for a few known workflow-related keywords
+        const EXPECTED_KEYWORDS: &[&str] = &["prd", "architecture", "sprint", "epic"];
+        for kw in EXPECTED_KEYWORDS {
+            if !lower.contains(kw) {
+                errors.push(format!("missing expected keyword: {kw}"));
+            }
+        }
+
+        // Minimum size check — valid docs should be substantial
+        if docs.len() < 500 {
+            errors.push(format!(
+                "document too small ({} bytes, expected at least 500)",
+                docs.len()
+            ));
+        }
+
+        DocValidationResult {
+            valid: errors.is_empty(),
+            errors,
+        }
+    }
+
+    /// Return the doc source metadata.
+    pub fn doc_source(&self) -> &DocSource {
+        &self.doc_source
+    }
+
+    /// Return the last refresh instant, if any.
+    pub fn last_refresh(&self) -> Option<std::time::Instant> {
+        self.last_refresh
+    }
+
+    /// Return the doc byte size.
+    pub fn doc_byte_size(&self) -> usize {
+        self.doc_byte_size
     }
 
     /// Return the raw documentation (embedded or custom).
@@ -2153,5 +2243,95 @@ mod tests {
     fn scan_project_nonexistent_path() {
         let result = BmadIndex::scan_project_dir(std::path::Path::new("/nonexistent/path/xyz"));
         assert!(result.is_err(), "should return error for nonexistent path");
+    }
+
+    // ------------------------------------------------------------------
+    // Doc validation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validate_docs_embedded_is_valid() {
+        let result = BmadIndex::validate_docs(BMAD_DOCS);
+        assert!(result.valid, "embedded docs should pass validation: {:?}", result.errors);
+    }
+
+    #[test]
+    fn validate_docs_empty_string_is_invalid() {
+        let result = BmadIndex::validate_docs("");
+        assert!(!result.valid);
+        assert!(!result.errors.is_empty());
+    }
+
+    #[test]
+    fn validate_docs_too_small_is_invalid() {
+        let result = BmadIndex::validate_docs("tiny");
+        assert!(!result.valid);
+        let err_text = result.errors.join(" ");
+        assert!(err_text.contains("too small"));
+    }
+
+    #[test]
+    fn validate_docs_missing_phases_is_invalid() {
+        // Has size but missing phase keywords
+        let content = "x".repeat(600);
+        let result = BmadIndex::validate_docs(&content);
+        assert!(!result.valid);
+        let err_text = result.errors.join(" ");
+        assert!(err_text.contains("analysis"));
+    }
+
+    #[test]
+    fn validate_docs_valid_content() {
+        // Craft a minimal doc that has all required keywords
+        let content = format!(
+            "{}\nanalysis planning solutioning implementation prd architecture sprint epic",
+            "x".repeat(600)
+        );
+        let result = BmadIndex::validate_docs(&content);
+        assert!(result.valid, "should be valid: {:?}", result.errors);
+    }
+
+    #[test]
+    fn build_with_invalid_docs_still_works() {
+        // build_with_docs doesn't validate — it always builds.
+        // The caller (refresh_docs) is responsible for calling validate_docs first.
+        let idx = BmadIndex::build_with_docs("garbage".to_string());
+        assert!(idx.all_workflow_ids().len() >= 18, "workflows come from static data, not docs");
+        assert_eq!(idx.raw_docs(), "garbage");
+    }
+
+    // ------------------------------------------------------------------
+    // Doc source & metadata
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn build_sets_source_and_metadata() {
+        let idx = BmadIndex::build();
+        assert_eq!(*idx.doc_source(), DocSource::Embedded);
+        assert!(idx.last_refresh().is_some());
+        assert!(idx.doc_byte_size() > 0);
+    }
+
+    #[test]
+    fn build_with_source_tracks_url() {
+        let idx = BmadIndex::build_with_source(
+            "test content".to_string(),
+            DocSource::Url("https://example.com".to_string()),
+        );
+        assert_eq!(*idx.doc_source(), DocSource::Url("https://example.com".to_string()));
+        assert_eq!(idx.doc_byte_size(), 12);
+    }
+
+    #[test]
+    fn doc_source_display() {
+        assert_eq!(DocSource::Embedded.to_string(), "embedded");
+        assert_eq!(
+            DocSource::Url("https://example.com".to_string()).to_string(),
+            "url: https://example.com"
+        );
+        assert_eq!(
+            DocSource::Cache("/tmp/test".to_string()).to_string(),
+            "cache: /tmp/test"
+        );
     }
 }

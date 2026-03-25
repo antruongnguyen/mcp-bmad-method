@@ -2,7 +2,7 @@ mod bmad_index;
 
 use std::sync::Arc;
 
-use bmad_index::{BmadIndex, Phase, SprintGuideResult, Track};
+use bmad_index::{BmadIndex, DocSource, Phase, SprintGuideResult, Track};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -112,6 +112,9 @@ struct SprintGuideRequest {
 struct RefreshDocsRequest {}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct IndexStatusRequest {}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[allow(dead_code)]
 struct ProjectStateRequest {
     /// Absolute or relative path to the project root directory.
@@ -160,14 +163,52 @@ fn default_cache_path() -> std::path::PathBuf {
     base.join("llms-full.txt")
 }
 
-/// Fetch docs from URL and cache to disk.
+/// Fetch docs from URL with retry logic (max 3 attempts, exponential backoff starting at 1s), then cache to disk.
 async fn fetch_and_cache_docs(url: &str) -> Result<String, String> {
     let cache_path = std::env::var("BMAD_DOCS_CACHE_PATH")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| default_cache_path());
 
-    tracing::info!(%url, ?cache_path, "fetching docs from remote source");
+    let max_attempts = 3u32;
+    let mut last_err = String::new();
 
+    for attempt in 1..=max_attempts {
+        tracing::info!(%url, attempt, max_attempts, ?cache_path, "fetching docs from remote source");
+
+        match try_fetch_docs(url).await {
+            Ok(body) => {
+                tracing::info!(%url, attempt, bytes = body.len(), "fetch succeeded");
+
+                // Cache to disk
+                if let Some(parent) = cache_path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                if let Err(e) = tokio::fs::write(&cache_path, &body).await {
+                    tracing::warn!(?cache_path, %e, "failed to cache docs to disk");
+                } else {
+                    tracing::info!(?cache_path, bytes = body.len(), "cached docs to disk");
+                }
+
+                return Ok(body);
+            }
+            Err(e) => {
+                last_err = e;
+                if attempt < max_attempts {
+                    let delay = std::time::Duration::from_secs(1 << (attempt - 1));
+                    tracing::warn!(%url, attempt, ?delay, error = %last_err, "fetch failed, retrying");
+                    tokio::time::sleep(delay).await;
+                } else {
+                    tracing::error!(%url, attempt, error = %last_err, "fetch failed, no retries left");
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Single HTTP fetch attempt — returns body or error.
+async fn try_fetch_docs(url: &str) -> Result<String, String> {
     let response = reqwest::get(url)
         .await
         .map_err(|e| format!("HTTP request failed: {e}"))?;
@@ -185,28 +226,19 @@ async fn fetch_and_cache_docs(url: &str) -> Result<String, String> {
         return Err("remote docs response was empty".to_string());
     }
 
-    // Cache to disk
-    if let Some(parent) = cache_path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    if let Err(e) = tokio::fs::write(&cache_path, &body).await {
-        tracing::warn!(?cache_path, %e, "failed to cache docs to disk");
-    } else {
-        tracing::info!(?cache_path, bytes = body.len(), "cached docs to disk");
-    }
-
     Ok(body)
 }
 
 /// Load docs for startup: try URL first, then cache, then embedded fallback.
-async fn load_startup_docs() -> String {
+/// Returns `(doc_content, doc_source)`.
+async fn load_startup_docs() -> (String, DocSource) {
     let url = std::env::var("BMAD_DOCS_URL").ok();
 
     if let Some(ref url) = url {
         match fetch_and_cache_docs(url).await {
             Ok(docs) => {
                 tracing::info!("using remote docs ({} bytes)", docs.len());
-                return docs;
+                return (docs, DocSource::Url(url.clone()));
             }
             Err(e) => {
                 tracing::warn!(%e, "failed to fetch remote docs, trying cache");
@@ -223,11 +255,14 @@ async fn load_startup_docs() -> String {
         && !cached.trim().is_empty()
     {
         tracing::info!(?cache_path, "using cached docs ({} bytes)", cached.len());
-        return cached;
+        return (
+            cached,
+            DocSource::Cache(cache_path.to_string_lossy().to_string()),
+        );
     }
 
     tracing::info!("using embedded docs");
-    BmadIndex::embedded_docs().to_string()
+    (BmadIndex::embedded_docs().to_string(), DocSource::Embedded)
 }
 
 #[tool_router]
@@ -837,7 +872,8 @@ impl BmadServer {
 
     #[tool(description = "Refresh the BMad Method documentation cache from the remote source. \
         Requires BMAD_ALLOW_REFRESH=1 and BMAD_DOCS_URL to be set. \
-        Fetches the latest docs, updates the cache, and rebuilds the index.")]
+        Fetches the latest docs, validates content, updates the cache, and rebuilds the index. \
+        If validation fails, the previous index is preserved.")]
     async fn bmad_refresh_docs(
         &self,
         #[allow(unused_variables)] Parameters(_req): Parameters<RefreshDocsRequest>,
@@ -862,19 +898,63 @@ impl BmadServer {
         tracing::info!(%url, "refreshing docs from remote source");
 
         let docs = fetch_and_cache_docs(&url).await.map_err(|e| {
+            tracing::error!(%url, error = %e, "doc refresh fetch failed");
             rmcp::ErrorData::internal_error(format!("Failed to fetch docs: {e}"), None)
         })?;
 
+        // Validate before replacing index
+        let validation = BmadIndex::validate_docs(&docs);
+        if !validation.valid {
+            let errors = validation.errors.join("; ");
+            tracing::warn!(%url, %errors, "doc validation failed, keeping previous index");
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Doc refresh failed validation — previous index preserved.\n\
+                 Validation errors: {errors}"
+            ))]));
+        }
+
         let bytes = docs.len();
-        let new_index = BmadIndex::build_with_docs(docs);
+        let new_index = BmadIndex::build_with_source(docs, DocSource::Url(url.clone()));
         let mut idx = self.index.write().await;
         *idx = new_index;
 
-        tracing::info!(bytes, "index rebuilt with refreshed docs");
+        tracing::info!(%url, bytes, "index rebuilt with refreshed docs");
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Documentation refreshed successfully ({bytes} bytes). Index rebuilt.",
         ))]))
+    }
+
+    #[tool(description = "Return diagnostic information about the current BMad index state: \
+        doc source (embedded, URL, or cache), last refresh time, total workflows parsed, \
+        total agents parsed, and doc byte size. No input parameters needed.")]
+    async fn bmad_index_status(
+        &self,
+        #[allow(unused_variables)] Parameters(_req): Parameters<IndexStatusRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let idx = self.index.read().await;
+        let source = idx.doc_source().to_string();
+        let workflows = idx.all_workflow_ids().len();
+        let agents = idx.all_agents().len();
+        let byte_size = idx.doc_byte_size();
+        let uptime = idx
+            .last_refresh()
+            .map(|t| {
+                let elapsed = t.elapsed();
+                format!("{:.1}s ago", elapsed.as_secs_f64())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let text = format!(
+            "## BMad Index Status\n\n\
+             - **Doc source:** {source}\n\
+             - **Last refresh:** {uptime}\n\
+             - **Total workflows:** {workflows}\n\
+             - **Total agents:** {agents}\n\
+             - **Doc byte size:** {byte_size}",
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 
@@ -916,8 +996,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting BMad Method MCP server");
 
-    let docs = load_startup_docs().await;
-    let index = Arc::new(RwLock::new(BmadIndex::build_with_docs(docs)));
+    let (docs, source) = load_startup_docs().await;
+    let index = Arc::new(RwLock::new(BmadIndex::build_with_source(docs, source)));
     tracing::info!("index built (lazy singleton, reused across all tool calls)");
 
     let server = BmadServer::new(index);

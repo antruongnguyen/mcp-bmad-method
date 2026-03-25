@@ -6,8 +6,8 @@ use tokio::sync::RwLock;
 use crate::bmad_index::BmadIndex;
 use crate::{
     AgentInfoRequest, BmadServer, CheckReadinessRequest, GetNextStepsRequest,
-    GetTrackWorkflowsRequest, GetWorkflowRequest, HelpRequest, ListAgentsRequest, NextStepRequest,
-    ProjectStateRequest, SprintGuideRequest,
+    GetTrackWorkflowsRequest, GetWorkflowRequest, HelpRequest, IndexStatusRequest,
+    ListAgentsRequest, NextStepRequest, ProjectStateRequest, SprintGuideRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -740,4 +740,37 @@ async fn project_state_partial_artifacts() {
     assert!(text.contains("PRD: found"));
     assert!(text.contains("Architecture: not found"));
     assert!(text.contains("Sprint status: not found"));
+}
+
+// =========================================================================
+// bmad_index_status
+// =========================================================================
+
+#[tokio::test]
+async fn index_status_returns_diagnostics() {
+    let srv = server();
+    let result = srv
+        .bmad_index_status(Parameters(IndexStatusRequest {}))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("BMad Index Status"), "should have status header");
+    assert!(text.contains("Doc source:"), "should show doc source");
+    assert!(text.contains("embedded"), "default source should be embedded");
+    assert!(text.contains("Total workflows:"), "should show workflow count");
+    assert!(text.contains("Total agents:"), "should show agent count");
+    assert!(text.contains("Doc byte size:"), "should show byte size");
+    assert!(text.contains("Last refresh:"), "should show refresh time");
+}
+
+#[tokio::test]
+async fn index_status_shows_correct_counts() {
+    let srv = server();
+    let result = srv
+        .bmad_index_status(Parameters(IndexStatusRequest {}))
+        .await;
+    let text = text_of(result);
+    // Should have at least 18 workflows and 9 agents
+    assert!(text.contains("18") || text.contains("19") || text.contains("20"),
+        "should show workflow count around 18+: {text}");
+    assert!(text.contains("9"), "should show 9 agents");
 }
