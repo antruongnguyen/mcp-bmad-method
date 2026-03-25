@@ -1,4 +1,6 @@
 node_modules/
+# Downloaded native binaries (not the .js wrapper)
 bin/mcp-bmad-server
+!bin/mcp-bmad-server.js
 bin/mcp-bmad-server.exe
 .cargo/
