@@ -8,7 +8,7 @@ use crate::bmad_index::BmadIndex;
 use crate::{
     AgentInfoRequest, BmadServer, CheckReadinessRequest, GetNextStepsRequest,
     GetTrackWorkflowsRequest, GetWorkflowRequest, HelpRequest, IndexStatusRequest,
-    ListAgentsRequest, NextStepRequest, ProjectStateRequest, ScaffoldRequest, SprintGuideRequest,
+    ListAgentsRequest, NextStepRequest, ProjectStateRequest, RunWorkflowRequest, ScaffoldRequest, SprintGuideRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -1251,10 +1251,7 @@ async fn resource_list_templates() {
 async fn resource_read_docs() {
     let client = resource_client().await;
     let result = client
-        .read_resource(rmcp::model::ReadResourceRequestParams {
-            uri: "bmad://docs".to_string(),
-            meta: None,
-        })
+        .read_resource(rmcp::model::ReadResourceRequestParams::new("bmad://docs"))
         .await
         .unwrap();
 
@@ -1275,10 +1272,7 @@ async fn resource_read_docs() {
 async fn resource_read_phase() {
     let client = resource_client().await;
     let result = client
-        .read_resource(rmcp::model::ReadResourceRequestParams {
-            uri: "bmad://phases/planning".to_string(),
-            meta: None,
-        })
+        .read_resource(rmcp::model::ReadResourceRequestParams::new("bmad://phases/planning"))
         .await
         .unwrap();
 
@@ -1298,10 +1292,7 @@ async fn resource_read_phase() {
 async fn resource_read_workflow() {
     let client = resource_client().await;
     let result = client
-        .read_resource(rmcp::model::ReadResourceRequestParams {
-            uri: "bmad://workflows/bmad-create-prd".to_string(),
-            meta: None,
-        })
+        .read_resource(rmcp::model::ReadResourceRequestParams::new("bmad://workflows/bmad-create-prd"))
         .await
         .unwrap();
 
@@ -1322,10 +1313,7 @@ async fn resource_read_workflow() {
 async fn resource_read_agent() {
     let client = resource_client().await;
     let result = client
-        .read_resource(rmcp::model::ReadResourceRequestParams {
-            uri: "bmad://agents/bmad-pm".to_string(),
-            meta: None,
-        })
+        .read_resource(rmcp::model::ReadResourceRequestParams::new("bmad://agents/bmad-pm"))
         .await
         .unwrap();
 
@@ -1345,10 +1333,7 @@ async fn resource_read_agent() {
 async fn resource_read_track() {
     let client = resource_client().await;
     let result = client
-        .read_resource(rmcp::model::ReadResourceRequestParams {
-            uri: "bmad://tracks/bmad-method".to_string(),
-            meta: None,
-        })
+        .read_resource(rmcp::model::ReadResourceRequestParams::new("bmad://tracks/bmad-method"))
         .await
         .unwrap();
 
@@ -1369,10 +1354,7 @@ async fn resource_read_track() {
 async fn resource_read_unknown_returns_error() {
     let client = resource_client().await;
     let result = client
-        .read_resource(rmcp::model::ReadResourceRequestParams {
-            uri: "bmad://nonexistent/foo".to_string(),
-            meta: None,
-        })
+        .read_resource(rmcp::model::ReadResourceRequestParams::new("bmad://nonexistent/foo"))
         .await;
 
     assert!(result.is_err(), "reading unknown URI should return error");
@@ -1384,10 +1366,7 @@ async fn resource_read_unknown_returns_error() {
 async fn resource_read_unknown_workflow_returns_error() {
     let client = resource_client().await;
     let result = client
-        .read_resource(rmcp::model::ReadResourceRequestParams {
-            uri: "bmad://workflows/nonexistent-workflow".to_string(),
-            meta: None,
-        })
+        .read_resource(rmcp::model::ReadResourceRequestParams::new("bmad://workflows/nonexistent-workflow"))
         .await;
 
     assert!(result.is_err(), "reading unknown workflow should return error");
@@ -1412,4 +1391,260 @@ async fn resource_subscribe_and_unsubscribe() {
         .unwrap();
 
     client.cancel().await.unwrap();
+}
+
+// =========================================================================
+// bmad_run_workflow
+// =========================================================================
+
+#[tokio::test]
+async fn run_workflow_start_creates_session() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "start".to_string(),
+            workflow_id: Some("bmad-create-prd".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("Workflow Started"), "should show started message: {text}");
+    assert!(text.contains("Step 1/4"), "should show step 1 of 4: {text}");
+    assert!(text.contains("Gather Requirements"), "should show first step title: {text}");
+}
+
+#[tokio::test]
+async fn run_workflow_start_json_output() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "start".to_string(),
+            workflow_id: Some("bmad-create-prd".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: Some("json".to_string()),
+        }))
+        .await;
+    let text = text_of(result);
+    let json: serde_json::Value = serde_json::from_str(&text).expect("should parse as JSON");
+    assert_eq!(json["action"], "start");
+    assert_eq!(json["total_steps"], 4);
+    assert_eq!(json["completed"], false);
+    assert!(json["step"].is_object());
+}
+
+#[tokio::test]
+async fn run_workflow_next_advances_step() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    // Start
+    srv.bmad_run_workflow(Parameters(RunWorkflowRequest {
+        action: "start".to_string(),
+        workflow_id: Some("bmad-create-story".to_string()),
+        project_dir: dir.path().to_string_lossy().to_string(),
+        step_result: None,
+        output_format: None,
+    }))
+    .await
+    .unwrap();
+
+    // Next (step 1 -> step 2)
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "next".to_string(),
+            workflow_id: Some("bmad-create-story".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: Some("selected story".to_string()),
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("Step 2/2"), "should advance to step 2: {text}");
+}
+
+#[tokio::test]
+async fn run_workflow_next_completes_workflow() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    // Start bmad-create-story (2 steps)
+    srv.bmad_run_workflow(Parameters(RunWorkflowRequest {
+        action: "start".to_string(),
+        workflow_id: Some("bmad-create-story".to_string()),
+        project_dir: dir.path().to_string_lossy().to_string(),
+        step_result: None,
+        output_format: None,
+    }))
+    .await
+    .unwrap();
+
+    // Advance step 1
+    srv.bmad_run_workflow(Parameters(RunWorkflowRequest {
+        action: "next".to_string(),
+        workflow_id: Some("bmad-create-story".to_string()),
+        project_dir: dir.path().to_string_lossy().to_string(),
+        step_result: None,
+        output_format: None,
+    }))
+    .await
+    .unwrap();
+
+    // Advance step 2 -> completed
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "next".to_string(),
+            workflow_id: Some("bmad-create-story".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("Workflow Completed"), "should show completed: {text}");
+    assert!(
+        text.contains("bmad-dev-story"),
+        "should suggest next workflow: {text}"
+    );
+}
+
+#[tokio::test]
+async fn run_workflow_status_shows_progress() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    // Start
+    srv.bmad_run_workflow(Parameters(RunWorkflowRequest {
+        action: "start".to_string(),
+        workflow_id: Some("bmad-create-prd".to_string()),
+        project_dir: dir.path().to_string_lossy().to_string(),
+        step_result: None,
+        output_format: None,
+    }))
+    .await
+    .unwrap();
+
+    // Status
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "status".to_string(),
+            workflow_id: Some("bmad-create-prd".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("In Progress"), "should show in progress: {text}");
+    assert!(text.contains("0/4"), "should show 0/4 steps: {text}");
+}
+
+#[tokio::test]
+async fn run_workflow_unknown_action_returns_error() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "invalid".to_string(),
+            workflow_id: Some("bmad-create-prd".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    assert!(result.is_err(), "unknown action should return error");
+}
+
+#[tokio::test]
+async fn run_workflow_start_missing_workflow_id_returns_error() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "start".to_string(),
+            workflow_id: None,
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    assert!(result.is_err(), "start without workflow_id should error");
+}
+
+#[tokio::test]
+async fn run_workflow_start_unknown_workflow_returns_error() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "start".to_string(),
+            workflow_id: Some("nonexistent".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    assert!(result.is_err(), "unknown workflow should error");
+}
+
+#[tokio::test]
+async fn run_workflow_next_without_session_returns_error() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "next".to_string(),
+            workflow_id: Some("bmad-create-prd".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    assert!(result.is_err(), "next without session should error");
+}
+
+#[tokio::test]
+async fn run_workflow_auto_detects_completed() {
+    let srv = server();
+    let dir = tempfile::tempdir().unwrap();
+    let bmad_dir = dir.path().join("_bmad");
+    std::fs::create_dir_all(&bmad_dir).unwrap();
+    let planning = dir.path().join("_bmad-output/planning-artifacts");
+    std::fs::create_dir_all(&planning).unwrap();
+    std::fs::write(planning.join("PRD.md"), "# PRD
+Test content").unwrap();
+
+    let result = srv
+        .bmad_run_workflow(Parameters(RunWorkflowRequest {
+            action: "start".to_string(),
+            workflow_id: Some("bmad-create-prd".to_string()),
+            project_dir: dir.path().to_string_lossy().to_string(),
+            step_result: None,
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(
+        text.contains("Already completed"),
+        "should detect existing PRD as completed: {text}"
+    );
 }

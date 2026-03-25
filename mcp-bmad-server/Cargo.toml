@@ -23,3 +23,4 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 [dev-dependencies]
 tempfile = "3"
+rmcp = { version = "1.2", features = ["client", "transport-io"] }
