@@ -159,6 +159,18 @@ pub struct ReadinessResult {
     pub next_action: String,
 }
 
+/// Result from scanning a project directory for BMad artifacts.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ProjectStateResult {
+    pub bmad_installed: bool,
+    pub prd_found: bool,
+    pub architecture_found: bool,
+    pub epic_count: usize,
+    pub sprint_status_found: bool,
+    pub project_context_found: bool,
+}
+
 /// Result from sprint guide cycle detection.
 pub struct SprintGuideResult {
     pub current_step: &'static str,
@@ -731,6 +743,61 @@ impl BmadIndex {
                     and the DEV will implement and review them in sequence.",
             }
         }
+    }
+
+    /// Scan a project directory and return which BMad artifacts exist.
+    ///
+    /// Checks for the standard BMad output structure:
+    /// - `_bmad/` config directory
+    /// - `_bmad-output/planning-artifacts/PRD.md`
+    /// - `_bmad-output/planning-artifacts/architecture.md`
+    /// - `_bmad-output/planning-artifacts/epics/` (counts `.md` files)
+    /// - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+    /// - `_bmad-output/project-context.md`
+    ///
+    /// Does not follow symlinks that leave `project_path`.
+    pub fn scan_project_dir(project_path: &std::path::Path) -> std::io::Result<ProjectStateResult> {
+        use std::fs;
+
+        let canon = project_path.canonicalize()?;
+
+        let bmad_installed = canon.join("_bmad").is_dir();
+
+        let planning = canon.join("_bmad-output/planning-artifacts");
+        let prd_found = planning.join("PRD.md").is_file();
+        let architecture_found = planning.join("architecture.md").is_file();
+
+        let epics_dir = planning.join("epics");
+        let epic_count = if epics_dir.is_dir() {
+            fs::read_dir(&epics_dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let path = e.path();
+                    // Only count .md files, skip symlinks that escape the project
+                    path.extension().is_some_and(|ext| ext == "md")
+                        && path
+                            .canonicalize()
+                            .ok()
+                            .is_some_and(|p| p.starts_with(&canon))
+                })
+                .count()
+        } else {
+            0
+        };
+
+        let impl_dir = canon.join("_bmad-output/implementation-artifacts");
+        let sprint_status_found = impl_dir.join("sprint-status.yaml").is_file();
+
+        let project_context_found = canon.join("_bmad-output/project-context.md").is_file();
+
+        Ok(ProjectStateResult {
+            bmad_installed,
+            prd_found,
+            architecture_found,
+            epic_count,
+            sprint_status_found,
+            project_context_found,
+        })
     }
 
     /// Search workflows, agents, and phases for a keyword (for bmad_help).
@@ -1966,5 +2033,125 @@ mod tests {
     fn sprint_guide_not_started() {
         let r = BmadIndex::sprint_guide("not started yet, brand new project");
         assert_eq!(r.workflow_to_run, "bmad-sprint-planning");
+    }
+
+    // ------------------------------------------------------------------
+    // Project state scanning
+    // ------------------------------------------------------------------
+
+    /// Create a temp directory with the full BMad output structure.
+    fn make_bmad_project(dir: &std::path::Path) {
+        use std::fs;
+        fs::create_dir_all(dir.join("_bmad")).unwrap();
+        fs::create_dir_all(dir.join("_bmad-output/planning-artifacts/epics")).unwrap();
+        fs::create_dir_all(dir.join("_bmad-output/implementation-artifacts")).unwrap();
+
+        fs::write(dir.join("_bmad-output/planning-artifacts/PRD.md"), "# PRD").unwrap();
+        fs::write(
+            dir.join("_bmad-output/planning-artifacts/architecture.md"),
+            "# Arch",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("_bmad-output/planning-artifacts/epics/epic-1.md"),
+            "# Epic 1",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("_bmad-output/planning-artifacts/epics/epic-2.md"),
+            "# Epic 2",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("_bmad-output/planning-artifacts/epics/epic-3.md"),
+            "# Epic 3",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("_bmad-output/implementation-artifacts/sprint-status.yaml"),
+            "status: active",
+        )
+        .unwrap();
+        fs::write(dir.join("_bmad-output/project-context.md"), "# Context").unwrap();
+    }
+
+    #[test]
+    fn scan_project_full_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_bmad_project(tmp.path());
+
+        let result = BmadIndex::scan_project_dir(tmp.path()).unwrap();
+        assert!(result.bmad_installed);
+        assert!(result.prd_found);
+        assert!(result.architecture_found);
+        assert_eq!(result.epic_count, 3);
+        assert!(result.sprint_status_found);
+        assert!(result.project_context_found);
+    }
+
+    #[test]
+    fn scan_project_not_bmad() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty directory — no _bmad/
+
+        let result = BmadIndex::scan_project_dir(tmp.path()).unwrap();
+        assert!(!result.bmad_installed);
+        assert!(!result.prd_found);
+        assert!(!result.architecture_found);
+        assert_eq!(result.epic_count, 0);
+        assert!(!result.sprint_status_found);
+        assert!(!result.project_context_found);
+    }
+
+    #[test]
+    fn scan_project_partial_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("_bmad")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("_bmad-output/planning-artifacts/epics")).unwrap();
+        std::fs::write(
+            tmp.path().join("_bmad-output/planning-artifacts/PRD.md"),
+            "# PRD",
+        )
+        .unwrap();
+
+        let result = BmadIndex::scan_project_dir(tmp.path()).unwrap();
+        assert!(result.bmad_installed);
+        assert!(result.prd_found);
+        assert!(!result.architecture_found);
+        assert_eq!(result.epic_count, 0);
+        assert!(!result.sprint_status_found);
+        assert!(!result.project_context_found);
+    }
+
+    #[test]
+    fn scan_project_epics_ignores_non_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("_bmad")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("_bmad-output/planning-artifacts/epics")).unwrap();
+        std::fs::write(
+            tmp.path().join("_bmad-output/planning-artifacts/epics/epic-1.md"),
+            "# Epic",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("_bmad-output/planning-artifacts/epics/.DS_Store"),
+            "",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path()
+                .join("_bmad-output/planning-artifacts/epics/notes.txt"),
+            "notes",
+        )
+        .unwrap();
+
+        let result = BmadIndex::scan_project_dir(tmp.path()).unwrap();
+        assert_eq!(result.epic_count, 1, "should only count .md files");
+    }
+
+    #[test]
+    fn scan_project_nonexistent_path() {
+        let result = BmadIndex::scan_project_dir(std::path::Path::new("/nonexistent/path/xyz"));
+        assert!(result.is_err(), "should return error for nonexistent path");
     }
 }

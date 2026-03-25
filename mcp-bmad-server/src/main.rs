@@ -111,6 +111,16 @@ struct SprintGuideRequest {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct RefreshDocsRequest {}
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ProjectStateRequest {
+    /// Absolute or relative path to the project root directory.
+    #[schemars(
+        description = "Absolute or relative path to the project root directory to scan for BMad artifacts"
+    )]
+    project_path: String,
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -716,6 +726,115 @@ impl BmadServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(description = "Scan a project directory and detect which BMad Method artifacts exist. \
+        Returns a structured report of the project state including BMad installation, \
+        planning artifacts (PRD, architecture, epics), implementation artifacts (sprint status), \
+        and project context. Also infers the current phase and recommends the next step.")]
+    async fn bmad_project_state(
+        &self,
+        Parameters(req): Parameters<ProjectStateRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = std::path::PathBuf::from(&req.project_path);
+        if !path.exists() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("Path does not exist: {}", req.project_path),
+                None,
+            ));
+        }
+        if !path.is_dir() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("Path is not a directory: {}", req.project_path),
+                None,
+            ));
+        }
+
+        let state = BmadIndex::scan_project_dir(&path).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to scan directory: {e}"), None)
+        })?;
+
+        if !state.bmad_installed {
+            let text = format!(
+                "## Project State: {path}\n\n\
+                 This does not appear to be a BMad project (`_bmad/` directory not found).\n\n\
+                 To get started with the BMad Method, initialize your project with the BMad \
+                 configuration directory. Use `bmad_help` for guidance on setting up a new project.",
+                path = req.project_path,
+            );
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
+        }
+
+        let found = |b: bool| if b { "found" } else { "not found" };
+        let epic_status = if state.epic_count > 0 {
+            format!("{} epic file(s) found", state.epic_count)
+        } else {
+            "not found".to_string()
+        };
+
+        // Build a project_state string for phase inference
+        let mut artifacts = Vec::new();
+        if state.prd_found {
+            artifacts.push("PRD");
+        }
+        if state.architecture_found {
+            artifacts.push("architecture");
+        }
+        if state.epic_count > 0 {
+            artifacts.push("epics");
+        }
+        if state.sprint_status_found {
+            artifacts.push("sprint status");
+        }
+
+        let inferred_state = if artifacts.is_empty() {
+            "nothing yet".to_string()
+        } else {
+            format!("has {}", artifacts.join(", has "))
+        };
+
+        let completed = BmadIndex::infer_completed_workflows(&inferred_state);
+        let phase = BmadIndex::infer_current_phase(&completed);
+
+        let idx = self.index.read().await;
+        let recommendations = idx.recommend_next(&completed, None);
+        let next_step = if let Some(wf) = recommendations.first() {
+            format!("`{}` ({})", wf.id, wf.agent)
+        } else {
+            "All workflows appear complete.".to_string()
+        };
+
+        // Infer track from artifacts
+        let suggested_track = if state.prd_found || state.architecture_found || state.epic_count > 0
+        {
+            "BMad Method"
+        } else {
+            "Quick Flow (or BMad Method — insufficient artifacts to determine)"
+        };
+
+        let text = format!(
+            "## Project State: {path}\n\n\
+             - BMad installed: yes\n\
+             - PRD: {prd}\n\
+             - Architecture: {arch}\n\
+             - Epics: {epics}\n\
+             - Sprint status: {sprint}\n\
+             - Project context: {ctx}\n\n\
+             Suggested track: {track}\n\
+             Current phase: {phase_name} (Phase {phase_num})\n\
+             Recommended next step: {next_step}",
+            path = req.project_path,
+            prd = found(state.prd_found),
+            arch = found(state.architecture_found),
+            epics = epic_status,
+            sprint = found(state.sprint_status_found),
+            ctx = found(state.project_context_found),
+            track = suggested_track,
+            phase_name = phase.name(),
+            phase_num = phase.number(),
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[tool(description = "Refresh the BMad Method documentation cache from the remote source. \
         Requires BMAD_ALLOW_REFRESH=1 and BMAD_DOCS_URL to be set. \
         Fetches the latest docs, updates the cache, and rebuilds the index.")]
@@ -780,6 +899,9 @@ impl ServerHandler for BmadServer {
             )
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
