@@ -1,0 +1,4 @@
+node_modules/
+bin/mcp-bmad-server
+bin/mcp-bmad-server.exe
+.cargo/

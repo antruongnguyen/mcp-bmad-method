@@ -2,9 +2,29 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server for the [BMad Method](https://docs.bmad-method.org/) (Build More Architect Dreams), implemented in Rust using the [rmcp](https://github.com/modelcontextprotocol/rust-sdk) SDK.
 
-## Prerequisites
+## Install
 
-- Rust 1.85+ (edition 2024 support)
+### npx (no install needed)
+
+```sh
+npx @bmad-method/mcp-server
+```
+
+### npm (global)
+
+```sh
+npm install -g @bmad-method/mcp-server
+```
+
+### Cargo
+
+```sh
+cargo install mcp-bmad-server
+```
+
+### From Source
+
+Requires Rust 1.85+ (edition 2024 support).
 
 ## Build
 
@@ -97,7 +117,20 @@ Add to your `claude_desktop_config.json` (see `example/claude_desktop_config.jso
 {
   "mcpServers": {
     "bmad-method": {
-      "command": "/path/to/mcp-bmad-server"
+      "command": "npx",
+      "args": ["@bmad-method/mcp-server"]
+    }
+  }
+}
+```
+
+Or if you installed the binary directly:
+
+```json
+{
+  "mcpServers": {
+    "bmad-method": {
+      "command": "mcp-bmad-server"
     }
   }
 }
@@ -111,7 +144,8 @@ Add to your MCP settings (see `example/cursor_mcp.json`):
 {
   "mcpServers": {
     "bmad-method": {
-      "command": "/path/to/mcp-bmad-server"
+      "command": "npx",
+      "args": ["@bmad-method/mcp-server"]
     }
   }
 }
