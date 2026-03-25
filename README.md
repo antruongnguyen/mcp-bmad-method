@@ -20,11 +20,33 @@ cargo build --release
 
 ## Run
 
-The server communicates over stdio using the MCP protocol:
+The server communicates over stdio using the MCP protocol (default):
 
 ```sh
 cargo run
 ```
+
+### SSE/HTTP Transport
+
+To run as a persistent HTTP service with Server-Sent Events (SSE) transport:
+
+```sh
+BMAD_TRANSPORT=sse cargo run
+```
+
+This starts an HTTP server on `127.0.0.1:3000` by default. MCP clients connect via `http://127.0.0.1:3000/mcp`.
+
+Configure the host and port with environment variables:
+
+```sh
+BMAD_TRANSPORT=sse BMAD_HOST=0.0.0.0 BMAD_PORT=8080 cargo run
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `BMAD_TRANSPORT` | `stdio` | Transport mode: `stdio` or `sse` |
+| `BMAD_HOST` | `127.0.0.1` | Bind address for SSE mode |
+| `BMAD_PORT` | `3000` | Bind port for SSE mode |
 
 Logs are written to stderr. Set `RUST_LOG` to control log level:
 
@@ -55,6 +77,12 @@ Build and run via Docker:
 ```sh
 docker build -t mcp-bmad-server .
 docker run -i mcp-bmad-server
+```
+
+For SSE mode:
+
+```sh
+docker run -e BMAD_TRANSPORT=sse -e BMAD_HOST=0.0.0.0 -p 3000:3000 mcp-bmad-server
 ```
 
 ## MCP Client Configuration

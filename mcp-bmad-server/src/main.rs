@@ -8,7 +8,13 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
-    transport::stdio,
+    transport::{
+        stdio,
+        streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService,
+            session::local::LocalSessionManager,
+        },
+    },
 };
 use tokio::sync::RwLock;
 
@@ -1000,9 +1006,52 @@ async fn main() -> anyhow::Result<()> {
     let index = Arc::new(RwLock::new(BmadIndex::build_with_source(docs, source)));
     tracing::info!("index built (lazy singleton, reused across all tool calls)");
 
-    let server = BmadServer::new(index);
-    let service = server.serve(stdio()).await?;
-    service.waiting().await?;
+    let transport = std::env::var("BMAD_TRANSPORT")
+        .unwrap_or_else(|_| "stdio".to_string());
+
+    match transport.as_str() {
+        "sse" | "http" => {
+            let host = std::env::var("BMAD_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+            let port: u16 = std::env::var("BMAD_PORT")
+                .unwrap_or_else(|_| "3000".to_string())
+                .parse()
+                .expect("BMAD_PORT must be a valid port number");
+
+            let addr = format!("{host}:{port}");
+            tracing::info!(%addr, "starting SSE/HTTP transport");
+
+            let ct = tokio_util::sync::CancellationToken::new();
+
+            let config = StreamableHttpServerConfig {
+                cancellation_token: ct.child_token(),
+                ..Default::default()
+            };
+
+            let service = StreamableHttpService::new(
+                move || Ok(BmadServer::new(index.clone())),
+                LocalSessionManager::default().into(),
+                config,
+            );
+
+            let router = axum::Router::new().nest_service("/mcp", service);
+
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            tracing::info!(%addr, "listening for MCP SSE connections");
+
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    tracing::info!("shutdown signal received");
+                    ct.cancel();
+                })
+                .await?;
+        }
+        _ => {
+            let server = BmadServer::new(index);
+            let service = server.serve(stdio()).await?;
+            service.waiting().await?;
+        }
+    }
 
     Ok(())
 }

@@ -13,4 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=builder /src/target/release/mcp-bmad-server /usr/local/bin/mcp-bmad-server
 
+EXPOSE 3000
+
 ENTRYPOINT ["mcp-bmad-server"]
