@@ -2,6 +2,10 @@
   "name": "@bmad-method/mcp-server",
   "version": "1.0.0",
   "description": "MCP server for the BMad Method (Build More Architect Dreams)",
+  "author": {
+    "name": "An Nguyen",
+    "email": "annguyen.apps@gmail.com"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
