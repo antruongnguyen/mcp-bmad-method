@@ -171,6 +171,14 @@ pub struct ProjectStateResult {
     pub project_context_found: bool,
 }
 
+/// Result from scaffolding a BMad project.
+#[derive(Debug, Clone)]
+pub struct ScaffoldResult {
+    pub files_created: Vec<String>,
+    pub track: Track,
+    pub next_steps: Vec<&'static str>,
+}
+
 /// Result from sprint guide cycle detection.
 pub struct SprintGuideResult {
     pub current_step: &'static str,
@@ -888,6 +896,589 @@ impl BmadIndex {
             sprint_status_found,
             project_context_found,
         })
+    }
+
+    /// Generate starter BMad Method files in `project_path` for the given track.
+    ///
+    /// Creates the standard `_bmad/` config directory and appropriate planning
+    /// artifact stubs pre-filled with track-appropriate boilerplate and TODO
+    /// markers. Returns the list of files created and recommended next steps.
+    pub fn scaffold_project(
+        project_path: &std::path::Path,
+        track: Track,
+    ) -> std::io::Result<ScaffoldResult> {
+        use std::fs;
+
+        let bmad_dir = project_path.join("_bmad");
+        let output_dir = project_path.join("_bmad-output");
+        let planning_dir = output_dir.join("planning-artifacts");
+        let epics_dir = planning_dir.join("epics");
+        let impl_dir = output_dir.join("implementation-artifacts");
+
+        // Create directory structure
+        fs::create_dir_all(&bmad_dir)?;
+        fs::create_dir_all(&planning_dir)?;
+        fs::create_dir_all(&epics_dir)?;
+        fs::create_dir_all(&impl_dir)?;
+
+        let mut files_created = Vec::new();
+
+        // Project context (all tracks)
+        let context_path = output_dir.join("project-context.md");
+        fs::write(
+            &context_path,
+            Self::template_project_context(track),
+        )?;
+        files_created.push(Self::relative_path(project_path, &context_path));
+
+        match track {
+            Track::QuickFlow => {
+                // Quick Flow only needs a tech-spec stub
+                let spec_path = planning_dir.join("tech-spec.md");
+                fs::write(&spec_path, Self::template_tech_spec())?;
+                files_created.push(Self::relative_path(project_path, &spec_path));
+            }
+            Track::BmadMethod => {
+                let prd_path = planning_dir.join("PRD.md");
+                fs::write(&prd_path, Self::template_prd(track))?;
+                files_created.push(Self::relative_path(project_path, &prd_path));
+
+                let arch_path = planning_dir.join("architecture.md");
+                fs::write(&arch_path, Self::template_architecture(track))?;
+                files_created.push(Self::relative_path(project_path, &arch_path));
+
+                let epic_path = epics_dir.join("epic-1.md");
+                fs::write(&epic_path, Self::template_epic())?;
+                files_created.push(Self::relative_path(project_path, &epic_path));
+            }
+            Track::Enterprise => {
+                let prd_path = planning_dir.join("PRD.md");
+                fs::write(&prd_path, Self::template_prd(track))?;
+                files_created.push(Self::relative_path(project_path, &prd_path));
+
+                let arch_path = planning_dir.join("architecture.md");
+                fs::write(&arch_path, Self::template_architecture(track))?;
+                files_created.push(Self::relative_path(project_path, &arch_path));
+
+                let epic_path = epics_dir.join("epic-1.md");
+                fs::write(&epic_path, Self::template_epic())?;
+                files_created.push(Self::relative_path(project_path, &epic_path));
+
+                let security_path = planning_dir.join("security.md");
+                fs::write(&security_path, Self::template_security())?;
+                files_created.push(Self::relative_path(project_path, &security_path));
+
+                let devops_path = planning_dir.join("devops.md");
+                fs::write(&devops_path, Self::template_devops())?;
+                files_created.push(Self::relative_path(project_path, &devops_path));
+            }
+        }
+
+        let next_steps = match track {
+            Track::QuickFlow => vec!["bmad-quick-dev"],
+            Track::BmadMethod => vec!["bmad-create-prd", "bmad-create-architecture"],
+            Track::Enterprise => vec![
+                "bmad-create-prd",
+                "bmad-create-architecture",
+            ],
+        };
+
+        Ok(ScaffoldResult {
+            files_created,
+            track,
+            next_steps,
+        })
+    }
+
+    fn relative_path(base: &std::path::Path, full: &std::path::Path) -> String {
+        full.strip_prefix(base)
+            .unwrap_or(full)
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn template_project_context(track: Track) -> &'static str {
+        match track {
+            Track::QuickFlow => "\
+# Project Context
+
+## Track
+Quick Flow
+
+## Description
+<!-- TODO: Briefly describe the project purpose and scope -->
+
+## Goals
+<!-- TODO: List the key goals for this project -->
+- [ ] Goal 1
+- [ ] Goal 2
+
+## Constraints
+<!-- TODO: List any known constraints (time, tech, budget) -->
+
+## Notes
+This project uses the BMad Method Quick Flow track, suitable for bug fixes,
+simple features, or clear-scope work (1-15 stories).
+",
+            Track::BmadMethod => "\
+# Project Context
+
+## Track
+BMad Method
+
+## Description
+<!-- TODO: Briefly describe the project purpose and scope -->
+
+## Goals
+<!-- TODO: List the key goals for this project -->
+- [ ] Goal 1
+- [ ] Goal 2
+
+## Stakeholders
+<!-- TODO: List key stakeholders and their roles -->
+
+## Constraints
+<!-- TODO: List any known constraints (time, tech, budget) -->
+
+## Notes
+This project uses the BMad Method track, suitable for products, platforms,
+and complex features (10-50+ stories). It includes PRD, Architecture, and
+UX design phases.
+",
+            Track::Enterprise => "\
+# Project Context
+
+## Track
+Enterprise
+
+## Description
+<!-- TODO: Briefly describe the project purpose and scope -->
+
+## Goals
+<!-- TODO: List the key goals for this project -->
+- [ ] Goal 1
+- [ ] Goal 2
+
+## Stakeholders
+<!-- TODO: List key stakeholders and their roles -->
+
+## Compliance Requirements
+<!-- TODO: List regulatory or compliance requirements -->
+
+## Constraints
+<!-- TODO: List any known constraints (time, tech, budget) -->
+
+## Notes
+This project uses the BMad Method Enterprise track, suitable for compliance,
+multi-tenant systems, and large-scale work (30+ stories). It includes PRD,
+Architecture, Security, and DevOps phases.
+",
+        }
+    }
+
+    fn template_tech_spec() -> &'static str {
+        "\
+# Tech Spec
+
+## Overview
+<!-- TODO: Describe what this change does and why -->
+
+## Scope
+<!-- TODO: Define what is in scope and out of scope -->
+
+### In Scope
+- [ ] Item 1
+
+### Out of Scope
+- N/A
+
+## Technical Approach
+<!-- TODO: Describe the technical approach -->
+
+## Testing Strategy
+<!-- TODO: Describe how this will be tested -->
+- [ ] Unit tests
+- [ ] Integration tests
+
+## Rollback Plan
+<!-- TODO: Describe how to roll back if something goes wrong -->
+
+## Checklist
+- [ ] Tech spec reviewed
+- [ ] Implementation complete
+- [ ] Tests passing
+- [ ] Code reviewed
+"
+    }
+
+    fn template_prd(track: Track) -> &'static str {
+        match track {
+            Track::Enterprise => "\
+# Product Requirements Document (PRD)
+
+## 1. Executive Summary
+<!-- TODO: High-level summary of the product/feature -->
+
+## 2. Problem Statement
+<!-- TODO: What problem does this solve? Who has this problem? -->
+
+## 3. Goals and Success Metrics
+<!-- TODO: Define measurable goals -->
+| Goal | Metric | Target |
+|------|--------|--------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+
+## 4. User Personas
+<!-- TODO: Define target users -->
+
+### Persona 1
+- **Role:** <!-- TODO -->
+- **Needs:** <!-- TODO -->
+- **Pain Points:** <!-- TODO -->
+
+## 5. Functional Requirements
+<!-- TODO: List functional requirements with priority -->
+
+### FR-1: <!-- TODO: Requirement title -->
+- **Priority:** High / Medium / Low
+- **Description:** <!-- TODO -->
+- **Acceptance Criteria:**
+  - [ ] <!-- TODO -->
+
+## 6. Non-Functional Requirements
+<!-- TODO: Performance, scalability, security, compliance -->
+
+### Performance
+- <!-- TODO: Response time, throughput targets -->
+
+### Security
+- <!-- TODO: Authentication, authorization, data protection -->
+
+### Compliance
+- <!-- TODO: Regulatory requirements (GDPR, SOC2, HIPAA, etc.) -->
+
+### Scalability
+- <!-- TODO: Expected load, growth projections -->
+
+## 7. Dependencies
+<!-- TODO: External systems, APIs, teams -->
+
+## 8. Timeline
+<!-- TODO: Key milestones -->
+
+## 9. Risks and Mitigations
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|-----------|-----------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+
+## 10. Open Questions
+- [ ] <!-- TODO -->
+",
+            _ => "\
+# Product Requirements Document (PRD)
+
+## 1. Executive Summary
+<!-- TODO: High-level summary of the product/feature -->
+
+## 2. Problem Statement
+<!-- TODO: What problem does this solve? Who has this problem? -->
+
+## 3. Goals and Success Metrics
+<!-- TODO: Define measurable goals -->
+| Goal | Metric | Target |
+|------|--------|--------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+
+## 4. User Personas
+<!-- TODO: Define target users -->
+
+### Persona 1
+- **Role:** <!-- TODO -->
+- **Needs:** <!-- TODO -->
+- **Pain Points:** <!-- TODO -->
+
+## 5. Functional Requirements
+<!-- TODO: List functional requirements with priority -->
+
+### FR-1: <!-- TODO: Requirement title -->
+- **Priority:** High / Medium / Low
+- **Description:** <!-- TODO -->
+- **Acceptance Criteria:**
+  - [ ] <!-- TODO -->
+
+## 6. Non-Functional Requirements
+<!-- TODO: Performance, scalability, security -->
+
+## 7. Dependencies
+<!-- TODO: External systems, APIs, teams -->
+
+## 8. Timeline
+<!-- TODO: Key milestones -->
+
+## 9. Open Questions
+- [ ] <!-- TODO -->
+",
+        }
+    }
+
+    fn template_architecture(track: Track) -> &'static str {
+        match track {
+            Track::Enterprise => "\
+# Architecture Document
+
+## 1. Overview
+<!-- TODO: High-level architecture description -->
+
+## 2. System Context
+<!-- TODO: How this system fits into the broader ecosystem -->
+
+## 3. Architecture Decisions (ADRs)
+
+### ADR-1: <!-- TODO: Decision title -->
+- **Status:** Proposed / Accepted / Deprecated
+- **Context:** <!-- TODO: Why is this decision needed? -->
+- **Decision:** <!-- TODO: What was decided? -->
+- **Consequences:** <!-- TODO: What are the trade-offs? -->
+
+## 4. Component Design
+<!-- TODO: Key components and their responsibilities -->
+
+## 5. Data Model
+<!-- TODO: Core entities and relationships -->
+
+## 6. API Design
+<!-- TODO: Key API endpoints or interfaces -->
+
+## 7. Security Architecture
+<!-- TODO: Authentication, authorization, encryption, audit logging -->
+
+### Authentication
+- <!-- TODO -->
+
+### Authorization
+- <!-- TODO -->
+
+### Data Protection
+- <!-- TODO -->
+
+### Audit Logging
+- <!-- TODO -->
+
+## 8. Infrastructure & DevOps
+<!-- TODO: Deployment architecture, CI/CD, monitoring -->
+
+### Deployment Architecture
+- <!-- TODO -->
+
+### CI/CD Pipeline
+- <!-- TODO -->
+
+### Monitoring & Alerting
+- <!-- TODO -->
+
+## 9. Scalability & Performance
+<!-- TODO: Scaling strategy, caching, performance targets -->
+
+## 10. Tech Stack
+<!-- TODO: Languages, frameworks, databases, cloud services -->
+| Layer | Technology | Rationale |
+|-------|-----------|-----------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+
+## 11. Risks and Mitigations
+| Risk | Impact | Mitigation |
+|------|--------|-----------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+",
+            _ => "\
+# Architecture Document
+
+## 1. Overview
+<!-- TODO: High-level architecture description -->
+
+## 2. Architecture Decisions (ADRs)
+
+### ADR-1: <!-- TODO: Decision title -->
+- **Status:** Proposed / Accepted / Deprecated
+- **Context:** <!-- TODO: Why is this decision needed? -->
+- **Decision:** <!-- TODO: What was decided? -->
+- **Consequences:** <!-- TODO: What are the trade-offs? -->
+
+## 3. Component Design
+<!-- TODO: Key components and their responsibilities -->
+
+## 4. Data Model
+<!-- TODO: Core entities and relationships -->
+
+## 5. API Design
+<!-- TODO: Key API endpoints or interfaces -->
+
+## 6. Tech Stack
+<!-- TODO: Languages, frameworks, databases, cloud services -->
+| Layer | Technology | Rationale |
+|-------|-----------|-----------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+
+## 7. Deployment
+<!-- TODO: How the system is deployed -->
+
+## 8. Risks
+| Risk | Impact | Mitigation |
+|------|--------|-----------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+",
+        }
+    }
+
+    fn template_epic() -> &'static str {
+        "\
+# Epic 1: <!-- TODO: Epic title -->
+
+## Description
+<!-- TODO: What does this epic deliver? -->
+
+## Stories
+
+### Story 1.1: <!-- TODO: Story title -->
+- **Priority:** High / Medium / Low
+- **Points:** <!-- TODO: Estimate -->
+- **Description:** <!-- TODO -->
+- **Acceptance Criteria:**
+  - [ ] <!-- TODO -->
+  - [ ] <!-- TODO -->
+
+### Story 1.2: <!-- TODO: Story title -->
+- **Priority:** High / Medium / Low
+- **Points:** <!-- TODO: Estimate -->
+- **Description:** <!-- TODO -->
+- **Acceptance Criteria:**
+  - [ ] <!-- TODO -->
+  - [ ] <!-- TODO -->
+
+## Dependencies
+<!-- TODO: List dependencies on other epics or external systems -->
+
+## Definition of Done
+- [ ] All stories implemented and reviewed
+- [ ] Tests passing
+- [ ] Documentation updated
+"
+    }
+
+    fn template_security() -> &'static str {
+        "\
+# Security Documentation
+
+## 1. Threat Model
+<!-- TODO: Identify key threats and attack vectors -->
+
+### Assets
+- <!-- TODO: What needs protection? -->
+
+### Threat Actors
+- <!-- TODO: Who might attack? -->
+
+### Attack Vectors
+| Vector | Likelihood | Impact | Mitigation |
+|--------|-----------|--------|-----------|
+| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+
+## 2. Authentication & Authorization
+<!-- TODO: Auth strategy -->
+
+### Authentication
+- <!-- TODO: Method (OAuth2, JWT, SAML, etc.) -->
+
+### Authorization
+- <!-- TODO: RBAC, ABAC, or other model -->
+
+### Session Management
+- <!-- TODO: Token lifecycle, refresh strategy -->
+
+## 3. Data Protection
+<!-- TODO: Encryption at rest and in transit -->
+
+### Encryption at Rest
+- <!-- TODO -->
+
+### Encryption in Transit
+- <!-- TODO -->
+
+### PII Handling
+- <!-- TODO: How is personally identifiable information handled? -->
+
+## 4. Compliance
+<!-- TODO: Regulatory requirements -->
+- [ ] GDPR
+- [ ] SOC2
+- [ ] HIPAA
+- [ ] Other: <!-- TODO -->
+
+## 5. Audit & Monitoring
+<!-- TODO: Security logging and monitoring strategy -->
+
+## 6. Incident Response
+<!-- TODO: Process for handling security incidents -->
+"
+    }
+
+    fn template_devops() -> &'static str {
+        "\
+# DevOps Documentation
+
+## 1. Infrastructure
+<!-- TODO: Cloud provider, regions, architecture -->
+
+### Environment Overview
+| Environment | Purpose | URL |
+|------------|---------|-----|
+| Development | <!-- TODO --> | <!-- TODO --> |
+| Staging | <!-- TODO --> | <!-- TODO --> |
+| Production | <!-- TODO --> | <!-- TODO --> |
+
+## 2. CI/CD Pipeline
+<!-- TODO: Build, test, deploy pipeline -->
+
+### Build
+- <!-- TODO: Build tool and process -->
+
+### Test
+- <!-- TODO: Test stages (unit, integration, e2e) -->
+
+### Deploy
+- <!-- TODO: Deployment strategy (blue-green, canary, rolling) -->
+
+## 3. Monitoring & Alerting
+<!-- TODO: Observability stack -->
+
+### Metrics
+- <!-- TODO: Key metrics to track -->
+
+### Logging
+- <!-- TODO: Logging strategy and tools -->
+
+### Alerting
+- <!-- TODO: Alert rules and escalation -->
+
+## 4. Disaster Recovery
+<!-- TODO: Backup and recovery strategy -->
+
+### Backup Strategy
+- <!-- TODO: What is backed up, frequency, retention -->
+
+### Recovery Objectives
+- **RPO:** <!-- TODO: Recovery Point Objective -->
+- **RTO:** <!-- TODO: Recovery Time Objective -->
+
+## 5. Scaling Strategy
+<!-- TODO: Auto-scaling rules and capacity planning -->
+
+## 6. Runbooks
+<!-- TODO: Link to operational runbooks for common tasks -->
+- [ ] Deployment runbook
+- [ ] Incident response runbook
+- [ ] Scaling runbook
+"
     }
 
     /// Search workflows, agents, and phases for a keyword (for bmad_help).
@@ -2333,5 +2924,178 @@ mod tests {
             DocSource::Cache("/tmp/test".to_string()).to_string(),
             "cache: /tmp/test"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Scaffold
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn scaffold_quick_flow_creates_expected_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = BmadIndex::scaffold_project(tmp.path(), Track::QuickFlow).unwrap();
+
+        assert_eq!(result.track, Track::QuickFlow);
+        assert!(result.files_created.iter().any(|f| f.contains("project-context.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("tech-spec.md")));
+        // Quick Flow should NOT create PRD or architecture
+        assert!(!result.files_created.iter().any(|f| f.contains("PRD.md")));
+        assert!(!result.files_created.iter().any(|f| f.contains("architecture.md")));
+        assert_eq!(result.files_created.len(), 2);
+        assert!(result.next_steps.contains(&"bmad-quick-dev"));
+    }
+
+    #[test]
+    fn scaffold_bmad_method_creates_expected_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = BmadIndex::scaffold_project(tmp.path(), Track::BmadMethod).unwrap();
+
+        assert_eq!(result.track, Track::BmadMethod);
+        assert!(result.files_created.iter().any(|f| f.contains("project-context.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("PRD.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("architecture.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("epic-1.md")));
+        assert_eq!(result.files_created.len(), 4);
+        assert!(result.next_steps.contains(&"bmad-create-prd"));
+        assert!(result.next_steps.contains(&"bmad-create-architecture"));
+    }
+
+    #[test]
+    fn scaffold_enterprise_creates_expected_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = BmadIndex::scaffold_project(tmp.path(), Track::Enterprise).unwrap();
+
+        assert_eq!(result.track, Track::Enterprise);
+        assert!(result.files_created.iter().any(|f| f.contains("project-context.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("PRD.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("architecture.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("epic-1.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("security.md")));
+        assert!(result.files_created.iter().any(|f| f.contains("devops.md")));
+        assert_eq!(result.files_created.len(), 6);
+    }
+
+    #[test]
+    fn scaffold_creates_directory_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        BmadIndex::scaffold_project(tmp.path(), Track::BmadMethod).unwrap();
+
+        assert!(tmp.path().join("_bmad").is_dir());
+        assert!(tmp.path().join("_bmad-output/planning-artifacts").is_dir());
+        assert!(tmp.path().join("_bmad-output/planning-artifacts/epics").is_dir());
+        assert!(tmp.path().join("_bmad-output/implementation-artifacts").is_dir());
+    }
+
+    #[test]
+    fn scaffold_files_contain_boilerplate() {
+        let tmp = tempfile::tempdir().unwrap();
+        BmadIndex::scaffold_project(tmp.path(), Track::BmadMethod).unwrap();
+
+        let prd = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/planning-artifacts/PRD.md"),
+        )
+        .unwrap();
+        assert!(prd.contains("Product Requirements Document"));
+        assert!(prd.contains("TODO"));
+
+        let arch = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/planning-artifacts/architecture.md"),
+        )
+        .unwrap();
+        assert!(arch.contains("Architecture Document"));
+        assert!(arch.contains("TODO"));
+
+        let epic = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/planning-artifacts/epics/epic-1.md"),
+        )
+        .unwrap();
+        assert!(epic.contains("Epic 1"));
+        assert!(epic.contains("TODO"));
+
+        let ctx = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/project-context.md"),
+        )
+        .unwrap();
+        assert!(ctx.contains("Project Context"));
+        assert!(ctx.contains("BMad Method"));
+    }
+
+    #[test]
+    fn scaffold_enterprise_has_security_and_devops_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        BmadIndex::scaffold_project(tmp.path(), Track::Enterprise).unwrap();
+
+        let security = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/planning-artifacts/security.md"),
+        )
+        .unwrap();
+        assert!(security.contains("Security"));
+        assert!(security.contains("Threat Model"));
+
+        let devops = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/planning-artifacts/devops.md"),
+        )
+        .unwrap();
+        assert!(devops.contains("DevOps"));
+        assert!(devops.contains("CI/CD"));
+    }
+
+    #[test]
+    fn scaffold_enterprise_prd_has_compliance_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        BmadIndex::scaffold_project(tmp.path(), Track::Enterprise).unwrap();
+
+        let prd = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/planning-artifacts/PRD.md"),
+        )
+        .unwrap();
+        assert!(prd.contains("Compliance"), "Enterprise PRD should have compliance section");
+    }
+
+    #[test]
+    fn scaffold_enterprise_architecture_has_security_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        BmadIndex::scaffold_project(tmp.path(), Track::Enterprise).unwrap();
+
+        let arch = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/planning-artifacts/architecture.md"),
+        )
+        .unwrap();
+        assert!(arch.contains("Security Architecture"),
+            "Enterprise architecture should have security section");
+    }
+
+    #[test]
+    fn scaffold_detected_by_scan_project_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        BmadIndex::scaffold_project(tmp.path(), Track::BmadMethod).unwrap();
+
+        let state = BmadIndex::scan_project_dir(tmp.path()).unwrap();
+        assert!(state.bmad_installed, "scaffolded project should have _bmad dir");
+        assert!(state.prd_found, "scaffolded project should have PRD.md");
+        assert!(state.architecture_found, "scaffolded project should have architecture.md");
+        assert_eq!(state.epic_count, 1, "scaffolded project should have 1 epic");
+        assert!(state.project_context_found, "scaffolded project should have project-context.md");
+    }
+
+    #[test]
+    fn scaffold_nonexistent_dir_errors() {
+        let result = BmadIndex::scaffold_project(
+            std::path::Path::new("/nonexistent/scaffold/dir"),
+            Track::BmadMethod,
+        );
+        assert!(result.is_err(), "should fail for nonexistent directory");
+    }
+
+    #[test]
+    fn scaffold_quick_flow_context_mentions_track() {
+        let tmp = tempfile::tempdir().unwrap();
+        BmadIndex::scaffold_project(tmp.path(), Track::QuickFlow).unwrap();
+
+        let ctx = std::fs::read_to_string(
+            tmp.path().join("_bmad-output/project-context.md"),
+        )
+        .unwrap();
+        assert!(ctx.contains("Quick Flow"), "Quick Flow context should mention the track");
     }
 }

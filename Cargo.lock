@@ -786,6 +786,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

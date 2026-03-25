@@ -7,7 +7,7 @@ use crate::bmad_index::BmadIndex;
 use crate::{
     AgentInfoRequest, BmadServer, CheckReadinessRequest, GetNextStepsRequest,
     GetTrackWorkflowsRequest, GetWorkflowRequest, HelpRequest, IndexStatusRequest,
-    ListAgentsRequest, NextStepRequest, ProjectStateRequest, SprintGuideRequest,
+    ListAgentsRequest, NextStepRequest, ProjectStateRequest, ScaffoldRequest, SprintGuideRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +44,7 @@ async fn get_workflow_valid_id() {
     let result = srv
         .bmad_get_workflow(Parameters(GetWorkflowRequest {
             workflow_id: "bmad-create-prd".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -59,6 +60,7 @@ async fn get_workflow_unknown_id() {
     let result = srv
         .bmad_get_workflow(Parameters(GetWorkflowRequest {
             workflow_id: "nonexistent-workflow".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -79,6 +81,7 @@ async fn get_next_steps_analysis() {
     let result = srv
         .bmad_get_next_steps(Parameters(GetNextStepsRequest {
             phase: "Analysis".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -92,6 +95,7 @@ async fn get_next_steps_planning() {
     let result = srv
         .bmad_get_next_steps(Parameters(GetNextStepsRequest {
             phase: "Planning".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -104,6 +108,7 @@ async fn get_next_steps_solutioning() {
     let result = srv
         .bmad_get_next_steps(Parameters(GetNextStepsRequest {
             phase: "Solutioning".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -116,6 +121,7 @@ async fn get_next_steps_implementation() {
     let result = srv
         .bmad_get_next_steps(Parameters(GetNextStepsRequest {
             phase: "Implementation".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -128,6 +134,7 @@ async fn get_next_steps_unknown_phase() {
     let result = srv
         .bmad_get_next_steps(Parameters(GetNextStepsRequest {
             phase: "Nonexistent".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -151,6 +158,7 @@ async fn get_track_workflows_quick_flow() {
     let result = srv
         .bmad_get_track_workflows(Parameters(GetTrackWorkflowsRequest {
             track: "Quick Flow".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -164,6 +172,7 @@ async fn get_track_workflows_bmad_method() {
     let result = srv
         .bmad_get_track_workflows(Parameters(GetTrackWorkflowsRequest {
             track: "BMad Method".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -178,6 +187,7 @@ async fn get_track_workflows_enterprise() {
     let result = srv
         .bmad_get_track_workflows(Parameters(GetTrackWorkflowsRequest {
             track: "Enterprise".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -191,6 +201,7 @@ async fn get_track_workflows_unknown() {
     let result = srv
         .bmad_get_track_workflows(Parameters(GetTrackWorkflowsRequest {
             track: "FooTrack".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -209,6 +220,7 @@ async fn next_step_has_prd_only() {
         .bmad_next_step(Parameters(NextStepRequest {
             project_state: "has PRD".to_string(),
             last_workflow: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -226,6 +238,7 @@ async fn next_step_has_prd_and_architecture() {
         .bmad_next_step(Parameters(NextStepRequest {
             project_state: "has PRD, has architecture".to_string(),
             last_workflow: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -242,6 +255,7 @@ async fn next_step_has_all_artifacts() {
         .bmad_next_step(Parameters(NextStepRequest {
             project_state: "has PRD, has architecture, has epics, sprint status done".to_string(),
             last_workflow: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -259,6 +273,7 @@ async fn next_step_with_last_workflow() {
         .bmad_next_step(Parameters(NextStepRequest {
             project_state: "has PRD".to_string(),
             last_workflow: Some("bmad-create-prd".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -275,6 +290,7 @@ async fn next_step_empty_state() {
         .bmad_next_step(Parameters(NextStepRequest {
             project_state: "nothing yet".to_string(),
             last_workflow: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -295,6 +311,7 @@ async fn help_pm_agent() {
         .bmad_help(Parameters(HelpRequest {
             question: "bmad-pm".to_string(),
             context: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -311,6 +328,7 @@ async fn help_quick_flow() {
         .bmad_help(Parameters(HelpRequest {
             question: "what is Quick Flow?".to_string(),
             context: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -327,6 +345,7 @@ async fn help_with_context() {
         .bmad_help(Parameters(HelpRequest {
             question: "what should I do next?".to_string(),
             context: Some("BMad Method track, Planning phase".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -340,6 +359,7 @@ async fn help_no_results_gives_suggestions() {
         .bmad_help(Parameters(HelpRequest {
             question: "xyzzyfoobarbaz999".to_string(),
             context: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -361,6 +381,7 @@ async fn check_readiness_bmad_ready() {
         .bmad_check_readiness(Parameters(CheckReadinessRequest {
             project_state: "PRD done, architecture done, epics created".to_string(),
             track: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -376,6 +397,7 @@ async fn check_readiness_bmad_missing_prd() {
         .bmad_check_readiness(Parameters(CheckReadinessRequest {
             project_state: "architecture done, epics created".to_string(),
             track: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -391,6 +413,7 @@ async fn check_readiness_bmad_missing_architecture() {
         .bmad_check_readiness(Parameters(CheckReadinessRequest {
             project_state: "PRD done, epics created".to_string(),
             track: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -405,6 +428,7 @@ async fn check_readiness_quick_flow_ready() {
         .bmad_check_readiness(Parameters(CheckReadinessRequest {
             project_state: "tech-spec done".to_string(),
             track: Some("Quick Flow".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -420,6 +444,7 @@ async fn check_readiness_quick_flow_not_ready() {
         .bmad_check_readiness(Parameters(CheckReadinessRequest {
             project_state: "nothing yet".to_string(),
             track: Some("Quick Flow".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -434,6 +459,7 @@ async fn check_readiness_enterprise_missing_security() {
         .bmad_check_readiness(Parameters(CheckReadinessRequest {
             project_state: "PRD done, architecture done, DevOps done, epics created".to_string(),
             track: Some("Enterprise".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -448,6 +474,7 @@ async fn check_readiness_default_track_is_bmad() {
         .bmad_check_readiness(Parameters(CheckReadinessRequest {
             project_state: "PRD done, architecture done, epics created".to_string(),
             track: None,
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -462,7 +489,7 @@ async fn check_readiness_default_track_is_bmad() {
 async fn list_agents_no_filter() {
     let srv = server();
     let result = srv
-        .bmad_list_agents(Parameters(ListAgentsRequest { phase: None }))
+        .bmad_list_agents(Parameters(ListAgentsRequest { phase: None, output_format: None }))
         .await;
     let text = text_of(result);
     assert!(text.contains("BMad Agents"), "should have agents header");
@@ -478,6 +505,7 @@ async fn list_agents_filter_by_phase() {
     let result = srv
         .bmad_list_agents(Parameters(ListAgentsRequest {
             phase: Some("Implementation".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -493,6 +521,7 @@ async fn list_agents_filter_analysis() {
     let result = srv
         .bmad_list_agents(Parameters(ListAgentsRequest {
             phase: Some("Analysis".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -506,6 +535,7 @@ async fn list_agents_unknown_phase() {
     let result = srv
         .bmad_list_agents(Parameters(ListAgentsRequest {
             phase: Some("Nonexistent".to_string()),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -522,6 +552,7 @@ async fn agent_info_valid() {
     let result = srv
         .bmad_agent_info(Parameters(AgentInfoRequest {
             agent_id: "bmad-dev".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -538,6 +569,7 @@ async fn agent_info_architect() {
     let result = srv
         .bmad_agent_info(Parameters(AgentInfoRequest {
             agent_id: "bmad-architect".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -552,6 +584,7 @@ async fn agent_info_unknown() {
     let result = srv
         .bmad_agent_info(Parameters(AgentInfoRequest {
             agent_id: "nonexistent".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -569,6 +602,7 @@ async fn sprint_guide_story_created() {
     let result = srv
         .bmad_sprint_guide(Parameters(SprintGuideRequest {
             sprint_state: "story file created but not yet implemented".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -584,6 +618,7 @@ async fn sprint_guide_story_implemented() {
     let result = srv
         .bmad_sprint_guide(Parameters(SprintGuideRequest {
             sprint_state: "story implemented, waiting for review".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -597,6 +632,7 @@ async fn sprint_guide_epic_complete() {
     let result = srv
         .bmad_sprint_guide(Parameters(SprintGuideRequest {
             sprint_state: "all stories in epic done".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -611,6 +647,7 @@ async fn sprint_guide_no_sprint() {
     let result = srv
         .bmad_sprint_guide(Parameters(SprintGuideRequest {
             sprint_state: "brand new project, no sprint plan".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -624,6 +661,7 @@ async fn sprint_guide_fallback() {
     let result = srv
         .bmad_sprint_guide(Parameters(SprintGuideRequest {
             sprint_state: "random unrelated text".to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -675,6 +713,7 @@ async fn project_state_full_project() {
     let result = srv
         .bmad_project_state(Parameters(ProjectStateRequest {
             project_path: tmp.path().to_string_lossy().to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -698,6 +737,7 @@ async fn project_state_not_bmad_project() {
     let result = srv
         .bmad_project_state(Parameters(ProjectStateRequest {
             project_path: tmp.path().to_string_lossy().to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -714,6 +754,7 @@ async fn project_state_nonexistent_path() {
     let result = srv
         .bmad_project_state(Parameters(ProjectStateRequest {
             project_path: "/nonexistent/path/xyzzy".to_string(),
+            output_format: None,
         }))
         .await;
     assert!(result.is_err(), "should return error for nonexistent path");
@@ -734,6 +775,7 @@ async fn project_state_partial_artifacts() {
     let result = srv
         .bmad_project_state(Parameters(ProjectStateRequest {
             project_path: tmp.path().to_string_lossy().to_string(),
+            output_format: None,
         }))
         .await;
     let text = text_of(result);
@@ -750,7 +792,7 @@ async fn project_state_partial_artifacts() {
 async fn index_status_returns_diagnostics() {
     let srv = server();
     let result = srv
-        .bmad_index_status(Parameters(IndexStatusRequest {}))
+        .bmad_index_status(Parameters(IndexStatusRequest { output_format: None }))
         .await;
     let text = text_of(result);
     assert!(text.contains("BMad Index Status"), "should have status header");
@@ -766,11 +808,311 @@ async fn index_status_returns_diagnostics() {
 async fn index_status_shows_correct_counts() {
     let srv = server();
     let result = srv
-        .bmad_index_status(Parameters(IndexStatusRequest {}))
+        .bmad_index_status(Parameters(IndexStatusRequest { output_format: None }))
         .await;
     let text = text_of(result);
     // Should have at least 18 workflows and 9 agents
     assert!(text.contains("18") || text.contains("19") || text.contains("20"),
         "should show workflow count around 18+: {text}");
     assert!(text.contains("9"), "should show 9 agents");
+}
+
+// =========================================================================
+// bmad_scaffold
+// =========================================================================
+
+#[tokio::test]
+async fn scaffold_quick_flow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = server();
+    let result = srv
+        .bmad_scaffold(Parameters(ScaffoldRequest {
+            track: "quick_flow".to_string(),
+            project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("BMad Project Scaffolded"), "should have scaffold header");
+    assert!(text.contains("Quick Flow"), "should mention the track");
+    assert!(text.contains("tech-spec.md"), "should list tech-spec file");
+    assert!(text.contains("project-context.md"), "should list project context file");
+    assert!(text.contains("bmad-quick-dev"), "should suggest bmad-quick-dev as next step");
+
+    // Verify files actually exist
+    assert!(tmp.path().join("_bmad").is_dir());
+    assert!(tmp.path().join("_bmad-output/planning-artifacts/tech-spec.md").is_file());
+    assert!(tmp.path().join("_bmad-output/project-context.md").is_file());
+}
+
+#[tokio::test]
+async fn scaffold_bmad_method() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = server();
+    let result = srv
+        .bmad_scaffold(Parameters(ScaffoldRequest {
+            track: "bmad_method".to_string(),
+            project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("BMad Method"), "should mention BMad Method track");
+    assert!(text.contains("PRD.md"), "should list PRD");
+    assert!(text.contains("architecture.md"), "should list architecture");
+    assert!(text.contains("epic-1.md"), "should list epic");
+    assert!(text.contains("bmad-create-prd"), "should suggest create-prd");
+
+    // Verify files exist
+    assert!(tmp.path().join("_bmad-output/planning-artifacts/PRD.md").is_file());
+    assert!(tmp.path().join("_bmad-output/planning-artifacts/architecture.md").is_file());
+    assert!(tmp.path().join("_bmad-output/planning-artifacts/epics/epic-1.md").is_file());
+}
+
+#[tokio::test]
+async fn scaffold_enterprise() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = server();
+    let result = srv
+        .bmad_scaffold(Parameters(ScaffoldRequest {
+            track: "enterprise".to_string(),
+            project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    assert!(text.contains("Enterprise"), "should mention Enterprise track");
+    assert!(text.contains("security.md"), "should list security doc");
+    assert!(text.contains("devops.md"), "should list devops doc");
+
+    // Verify extra enterprise files
+    assert!(tmp.path().join("_bmad-output/planning-artifacts/security.md").is_file());
+    assert!(tmp.path().join("_bmad-output/planning-artifacts/devops.md").is_file());
+}
+
+#[tokio::test]
+async fn scaffold_unknown_track_returns_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = server();
+    let result = srv
+        .bmad_scaffold(Parameters(ScaffoldRequest {
+            track: "nonexistent_track".to_string(),
+            project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            output_format: None,
+        }))
+        .await;
+    assert!(result.is_err(), "should return error for unknown track");
+}
+
+#[tokio::test]
+async fn scaffold_nonexistent_dir_returns_error() {
+    let srv = server();
+    let result = srv
+        .bmad_scaffold(Parameters(ScaffoldRequest {
+            track: "bmad_method".to_string(),
+            project_dir: Some("/nonexistent/scaffold/test/dir".to_string()),
+            output_format: None,
+        }))
+        .await;
+    assert!(result.is_err(), "should return error for nonexistent dir");
+}
+
+#[tokio::test]
+async fn scaffold_then_project_state_detects_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = server();
+
+    // Scaffold first
+    let scaffold_result = srv
+        .bmad_scaffold(Parameters(ScaffoldRequest {
+            track: "bmad_method".to_string(),
+            project_dir: Some(tmp.path().to_string_lossy().to_string()),
+            output_format: None,
+        }))
+        .await;
+    assert!(scaffold_result.is_ok(), "scaffold should succeed");
+
+    // Then check project state
+    let state_result = srv
+        .bmad_project_state(Parameters(ProjectStateRequest {
+            project_path: tmp.path().to_string_lossy().to_string(),
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(state_result);
+    assert!(text.contains("BMad installed: yes"), "should detect BMad install");
+    assert!(text.contains("PRD: found"), "should detect PRD");
+    assert!(text.contains("Architecture: found"), "should detect architecture");
+    assert!(text.contains("1 epic file(s) found"), "should detect 1 epic");
+    assert!(text.contains("Project context: found"), "should detect project context");
+}
+
+#[tokio::test]
+async fn scaffold_track_aliases_work() {
+    // Test that various track aliases are accepted
+    for track_name in &["quick", "Quick Flow", "bmad", "BMad Method"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let srv = server();
+        let result = srv
+            .bmad_scaffold(Parameters(ScaffoldRequest {
+                track: track_name.to_string(),
+                project_dir: Some(tmp.path().to_string_lossy().to_string()),
+                output_format: None,
+            }))
+            .await;
+        let text = text_of(result);
+        assert!(
+            text.contains("BMad Project Scaffolded"),
+            "track alias '{track_name}' should work"
+        );
+    }
+}
+
+// =========================================================================
+// JSON output mode tests (output_format: "json")
+// =========================================================================
+
+fn json_format() -> Option<String> {
+    Some("json".to_string())
+}
+
+#[tokio::test]
+async fn json_get_workflow_valid() {
+    let srv = server();
+    let result = srv
+        .bmad_get_workflow(Parameters(GetWorkflowRequest {
+            workflow_id: "bmad-create-prd".to_string(),
+            output_format: json_format(),
+        }))
+        .await;
+    let text = text_of(result);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("should be valid JSON");
+    assert_eq!(v["id"], "bmad-create-prd");
+    assert!(v["phase"].as_str().unwrap().contains("Planning"));
+    assert!(v["agent"].as_str().is_some());
+    assert!(v["produces"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn json_get_workflow_not_found() {
+    let srv = server();
+    let result = srv
+        .bmad_get_workflow(Parameters(GetWorkflowRequest {
+            workflow_id: "nonexistent".to_string(),
+            output_format: json_format(),
+        }))
+        .await;
+    let text = text_of(result);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("should be valid JSON");
+    assert!(v["error"].as_str().unwrap().contains("not found"));
+    assert!(!v["available_workflows"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn json_get_next_steps() {
+    let srv = server();
+    let result = srv
+        .bmad_get_next_steps(Parameters(GetNextStepsRequest {
+            phase: "Analysis".to_string(),
+            output_format: json_format(),
+        }))
+        .await;
+    let text = text_of(result);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("should be valid JSON");
+    assert_eq!(v["phase"], "Analysis");
+    assert!(v["phase_number"].as_u64().is_some());
+    let steps = v["steps"].as_array().unwrap();
+    assert!(!steps.is_empty());
+    assert!(steps[0]["workflow_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn json_check_readiness() {
+    let srv = server();
+    let result = srv
+        .bmad_check_readiness(Parameters(CheckReadinessRequest {
+            project_state: "PRD done, architecture done, epics created".to_string(),
+            track: None,
+            output_format: json_format(),
+        }))
+        .await;
+    let text = text_of(result);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("should be valid JSON");
+    assert_eq!(v["ready"], true);
+    assert!(v["track"].as_str().is_some());
+    assert!(v["missing_artifacts"].as_array().unwrap().is_empty());
+    assert!(v["next_action"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn json_list_agents() {
+    let srv = server();
+    let result = srv
+        .bmad_list_agents(Parameters(ListAgentsRequest {
+            phase: None,
+            output_format: json_format(),
+        }))
+        .await;
+    let text = text_of(result);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("should be valid JSON");
+    assert_eq!(v["total"], 9);
+    let agents = v["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 9);
+    assert!(agents[0]["skill_id"].as_str().is_some());
+    assert!(agents[0]["name"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn json_agent_info() {
+    let srv = server();
+    let result = srv
+        .bmad_agent_info(Parameters(AgentInfoRequest {
+            agent_id: "bmad-dev".to_string(),
+            output_format: json_format(),
+        }))
+        .await;
+    let text = text_of(result);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("should be valid JSON");
+    assert_eq!(v["skill_id"], "bmad-dev");
+    assert!(v["name"].as_str().unwrap().contains("Developer"));
+    assert!(v["persona"].as_str().unwrap().contains("Amelia"));
+    let workflows = v["workflows"].as_array().unwrap();
+    assert!(!workflows.is_empty());
+    assert!(workflows[0]["id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn json_index_status() {
+    let srv = server();
+    let result = srv
+        .bmad_index_status(Parameters(IndexStatusRequest {
+            output_format: json_format(),
+        }))
+        .await;
+    let text = text_of(result);
+    let v: serde_json::Value = serde_json::from_str(&text).expect("should be valid JSON");
+    assert_eq!(v["doc_source"], "embedded");
+    assert!(v["total_workflows"].as_u64().unwrap() >= 18);
+    assert_eq!(v["total_agents"].as_u64().unwrap(), 9);
+    assert!(v["doc_byte_size"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn json_default_is_markdown() {
+    let srv = server();
+    // output_format: None should return markdown, not JSON
+    let result = srv
+        .bmad_get_workflow(Parameters(GetWorkflowRequest {
+            workflow_id: "bmad-create-prd".to_string(),
+            output_format: None,
+        }))
+        .await;
+    let text = text_of(result);
+    // Markdown output should NOT parse as JSON with expected fields
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&text).is_err()
+            || !text.starts_with('{'),
+        "default output should be markdown, not JSON"
+    );
+    assert!(text.contains("bmad-create-prd"), "should still contain workflow id");
 }

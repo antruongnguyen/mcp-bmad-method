@@ -2,7 +2,7 @@ mod bmad_index;
 
 use std::sync::Arc;
 
-use bmad_index::{BmadIndex, DocSource, Phase, SprintGuideResult, Track};
+use bmad_index::{BmadIndex, DocSource, Phase, ScaffoldResult, SprintGuideResult, Track};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -16,7 +16,227 @@ use rmcp::{
         },
     },
 };
+use serde::Serialize;
 use tokio::sync::RwLock;
+
+// ---------------------------------------------------------------------------
+// Output format helper
+// ---------------------------------------------------------------------------
+
+/// Return true when the caller requested JSON output.
+fn wants_json(format: &Option<String>) -> bool {
+    matches!(format.as_deref(), Some("json"))
+}
+
+/// Build a `CallToolResult` containing either pretty-printed JSON or markdown.
+fn format_output<T: Serialize>(format: &Option<String>, json_val: &T, markdown: String) -> CallToolResult {
+    if wants_json(format) {
+        let json = serde_json::to_string_pretty(json_val).unwrap_or_else(|e| {
+            format!("{{\"error\": \"serialization failed: {e}\"}}")
+        });
+        CallToolResult::success(vec![Content::text(json)])
+    } else {
+        CallToolResult::success(vec![Content::text(markdown)])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON response types
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct WorkflowResponse {
+    id: String,
+    description: String,
+    phase: String,
+    phase_number: u8,
+    agent: String,
+    produces: String,
+    prerequisites: Vec<String>,
+    next_steps: Vec<String>,
+    tracks: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WorkflowNotFoundResponse {
+    error: String,
+    available_workflows: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct NextStepsResponse {
+    phase: String,
+    phase_number: u8,
+    steps: Vec<NextStepEntry>,
+}
+
+#[derive(Serialize)]
+struct NextStepEntry {
+    workflow_id: String,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct PhaseErrorResponse {
+    error: String,
+    valid_phases: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TrackWorkflowsResponse {
+    track: String,
+    workflows: Vec<TrackWorkflowEntry>,
+}
+
+#[derive(Serialize)]
+struct TrackWorkflowEntry {
+    id: String,
+    description: String,
+    phase: String,
+    phase_number: u8,
+}
+
+#[derive(Serialize)]
+struct TrackErrorResponse {
+    error: String,
+    valid_tracks: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct NextStepRecommendation {
+    current_phase: String,
+    current_phase_number: u8,
+    detected_completed: Vec<String>,
+    recommendations: Vec<RecommendationEntry>,
+}
+
+#[derive(Serialize)]
+struct RecommendationEntry {
+    workflow_id: String,
+    description: String,
+    agent: String,
+    produces: String,
+    prerequisites: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct HelpResponse {
+    question: String,
+    context: Option<String>,
+    results: Vec<String>,
+    phase_overview: Option<Vec<PhaseOverviewEntry>>,
+    track_overview: Option<Vec<TrackOverviewEntry>>,
+}
+
+#[derive(Serialize)]
+struct PhaseOverviewEntry {
+    number: u8,
+    name: String,
+    description: String,
+    workflow_count: usize,
+}
+
+#[derive(Serialize)]
+struct TrackOverviewEntry {
+    name: String,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct ReadinessResponse {
+    ready: bool,
+    track: String,
+    project_state: String,
+    missing_artifacts: Vec<String>,
+    warnings: Vec<String>,
+    next_action: String,
+}
+
+#[derive(Serialize)]
+struct AgentListResponse {
+    phase_filter: Option<String>,
+    agents: Vec<AgentEntry>,
+    total: usize,
+}
+
+#[derive(Serialize)]
+struct AgentEntry {
+    skill_id: String,
+    name: String,
+    persona: String,
+    workflows: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct AgentDetailResponse {
+    skill_id: String,
+    name: String,
+    persona: String,
+    workflows: Vec<AgentWorkflowEntry>,
+}
+
+#[derive(Serialize)]
+struct AgentWorkflowEntry {
+    id: String,
+    description: String,
+    phase: String,
+    produces: String,
+    tracks: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct AgentNotFoundResponse {
+    error: String,
+    available_agents: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SprintGuideResponse {
+    current_step: String,
+    agent_to_invoke: String,
+    workflow_to_run: String,
+    rationale: String,
+    after_this: String,
+}
+
+#[derive(Serialize)]
+struct ProjectStateResponse {
+    project_path: String,
+    bmad_installed: bool,
+    prd_found: bool,
+    architecture_found: bool,
+    epic_count: usize,
+    sprint_status_found: bool,
+    project_context_found: bool,
+    suggested_track: String,
+    current_phase: String,
+    current_phase_number: u8,
+    recommended_next_step: String,
+}
+
+#[derive(Serialize)]
+struct IndexStatusResponse {
+    doc_source: String,
+    last_refresh: String,
+    total_workflows: usize,
+    total_agents: usize,
+    doc_byte_size: usize,
+}
+
+#[derive(Serialize)]
+struct RefreshResponse {
+    status: String,
+    message: String,
+    bytes: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ScaffoldResponse {
+    track: String,
+    project_dir: String,
+    files_created: Vec<String>,
+    next_steps: Vec<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Tool parameter types
@@ -27,6 +247,9 @@ struct GetWorkflowRequest {
     /// The workflow skill id, e.g. "bmad-create-prd".
     #[schemars(description = "The workflow skill id, e.g. \"bmad-create-prd\"")]
     workflow_id: String,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -34,6 +257,9 @@ struct GetNextStepsRequest {
     /// The phase name: "Analysis", "Planning", "Solutioning", or "Implementation".
     #[schemars(description = "Phase name: Analysis, Planning, Solutioning, or Implementation")]
     phase: String,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -41,6 +267,9 @@ struct GetTrackWorkflowsRequest {
     /// The planning track: "Quick Flow", "BMad Method", or "Enterprise".
     #[schemars(description = "Planning track: Quick Flow, BMad Method, or Enterprise")]
     track: String,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -54,6 +283,9 @@ struct NextStepRequest {
     /// Optional: the last workflow completed.
     #[schemars(description = "The last workflow completed, e.g. \"bmad-create-prd\"")]
     last_workflow: Option<String>,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -68,6 +300,9 @@ struct HelpRequest {
         description = "Optional current project context, e.g. \"BMad Method track, Planning phase\""
     )]
     context: Option<String>,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -85,6 +320,9 @@ struct CheckReadinessRequest {
         description = "Planning track: Quick Flow, BMad Method, or Enterprise. Defaults to BMad Method."
     )]
     track: Option<String>,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -94,6 +332,9 @@ struct ListAgentsRequest {
         description = "Optional phase filter: Analysis, Planning, Solutioning, or Implementation"
     )]
     phase: Option<String>,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -101,6 +342,9 @@ struct AgentInfoRequest {
     /// The agent skill id, e.g. "bmad-pm".
     #[schemars(description = "The agent skill id, e.g. \"bmad-pm\" or \"bmad-architect\"")]
     agent_id: String,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -112,13 +356,24 @@ struct SprintGuideRequest {
             E.g. \"epic 1 complete, working on epic 2 story 3, story file created but not yet implemented\""
     )]
     sprint_state: String,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct RefreshDocsRequest {}
+struct RefreshDocsRequest {
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct IndexStatusRequest {}
+struct IndexStatusRequest {
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[allow(dead_code)]
@@ -128,6 +383,28 @@ struct ProjectStateRequest {
         description = "Absolute or relative path to the project root directory to scan for BMad artifacts"
     )]
     project_path: String,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ScaffoldRequest {
+    /// The planning track: "quick_flow", "bmad_method", or "enterprise".
+    #[schemars(
+        description = "Planning track: quick_flow, bmad_method, or enterprise"
+    )]
+    track: String,
+    /// Optional: absolute or relative path to the project directory.
+    /// Defaults to the current working directory.
+    #[schemars(
+        description = "Absolute or relative path to the project root directory. Defaults to current directory."
+    )]
+    project_dir: Option<String>,
+    /// Output format: "markdown" (default) or "json".
+    #[schemars(description = "Output format: \"markdown\" (default) or \"json\"")]
+    output_format: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +428,7 @@ fn parse_phase(s: &str) -> Option<Phase> {
 }
 
 fn parse_track(s: &str) -> Option<Track> {
-    match s.to_lowercase().replace('-', " ").as_str() {
+    match s.to_lowercase().replace(['-', '_'], " ").as_str() {
         "quick flow" | "quickflow" | "quick" => Some(Track::QuickFlow),
         "bmad method" | "bmad" | "bmadmethod" => Some(Track::BmadMethod),
         "enterprise" => Some(Track::Enterprise),
@@ -291,6 +568,17 @@ impl BmadServer {
         match idx.get_workflow(&req.workflow_id) {
             Some(wf) => {
                 let tracks: Vec<&str> = wf.tracks.iter().map(|t| t.name()).collect();
+                let json_resp = WorkflowResponse {
+                    id: wf.id.to_string(),
+                    description: wf.description.to_string(),
+                    phase: wf.phase.name().to_string(),
+                    phase_number: wf.phase.number(),
+                    agent: wf.agent.to_string(),
+                    produces: wf.produces.to_string(),
+                    prerequisites: wf.prerequisites.iter().map(|s| s.to_string()).collect(),
+                    next_steps: wf.next_steps.iter().map(|s| s.to_string()).collect(),
+                    tracks: tracks.iter().map(|s| s.to_string()).collect(),
+                };
                 let text = format!(
                     "## {id}\n\n\
                      **Description:** {desc}\n\
@@ -318,16 +606,20 @@ impl BmadServer {
                     },
                     tracks = tracks.join(", "),
                 );
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(format_output(&req.output_format, &json_resp, text))
             }
             None => {
                 let all = idx.all_workflow_ids();
+                let json_resp = WorkflowNotFoundResponse {
+                    error: format!("Workflow '{}' not found", req.workflow_id),
+                    available_workflows: all.iter().map(|s| s.to_string()).collect(),
+                };
                 let text = format!(
                     "Workflow '{}' not found. Available workflows:\n{}",
                     req.workflow_id,
                     all.join(", ")
                 );
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(format_output(&req.output_format, &json_resp, text))
             }
         }
     }
@@ -342,6 +634,14 @@ impl BmadServer {
         match parse_phase(&req.phase) {
             Some(phase) => {
                 let steps = idx.get_next_steps(phase);
+                let json_resp = NextStepsResponse {
+                    phase: phase.name().to_string(),
+                    phase_number: phase.number(),
+                    steps: steps.iter().map(|s| NextStepEntry {
+                        workflow_id: s.to_string(),
+                        description: idx.get_workflow(s).map(|w| w.description).unwrap_or("(unknown)").to_string(),
+                    }).collect(),
+                };
                 let text = format!(
                     "## Next steps after {name} (Phase {num})\n\n{list}",
                     name = phase.name(),
@@ -359,14 +659,18 @@ impl BmadServer {
                         .collect::<Vec<_>>()
                         .join("\n"),
                 );
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(format_output(&req.output_format, &json_resp, text))
             }
             None => {
+                let json_resp = PhaseErrorResponse {
+                    error: format!("Unknown phase '{}'", req.phase),
+                    valid_phases: vec!["Analysis".to_string(), "Planning".to_string(), "Solutioning".to_string(), "Implementation".to_string()],
+                };
                 let text = format!(
                     "Unknown phase '{}'. Valid phases: Analysis, Planning, Solutioning, Implementation",
                     req.phase
                 );
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(format_output(&req.output_format, &json_resp, text))
             }
         }
     }
@@ -381,6 +685,15 @@ impl BmadServer {
         match parse_track(&req.track) {
             Some(track) => {
                 let wfs = idx.get_track_workflows(track);
+                let json_resp = TrackWorkflowsResponse {
+                    track: track.name().to_string(),
+                    workflows: wfs.iter().map(|wf| TrackWorkflowEntry {
+                        id: wf.id.to_string(),
+                        description: wf.description.to_string(),
+                        phase: wf.phase.name().to_string(),
+                        phase_number: wf.phase.number(),
+                    }).collect(),
+                };
                 let mut lines = vec![format!("## {} Track Workflows\n", track.name())];
                 for wf in &wfs {
                     lines.push(format!(
@@ -391,16 +704,18 @@ impl BmadServer {
                         wf.phase.name(),
                     ));
                 }
-                Ok(CallToolResult::success(vec![Content::text(
-                    lines.join("\n"),
-                )]))
+                Ok(format_output(&req.output_format, &json_resp, lines.join("\n")))
             }
             None => {
+                let json_resp = TrackErrorResponse {
+                    error: format!("Unknown track '{}'", req.track),
+                    valid_tracks: vec!["Quick Flow".to_string(), "BMad Method".to_string(), "Enterprise".to_string()],
+                };
                 let text = format!(
                     "Unknown track '{}'. Valid tracks: Quick Flow, BMad Method, Enterprise",
                     req.track
                 );
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(format_output(&req.output_format, &json_resp, text))
             }
         }
     }
@@ -419,6 +734,12 @@ impl BmadServer {
         let recommendations = idx.recommend_next(&completed, req.last_workflow.as_deref());
 
         if recommendations.is_empty() {
+            let json_resp = NextStepRecommendation {
+                current_phase: phase.name().to_string(),
+                current_phase_number: phase.number(),
+                detected_completed: completed.iter().map(|s| s.to_string()).collect(),
+                recommendations: vec![],
+            };
             let text = format!(
                 "## Next Step\n\n\
                  Based on your project state, you appear to be in the **{phase}** phase \
@@ -429,7 +750,7 @@ impl BmadServer {
                 phase = phase.name(),
                 num = phase.number(),
             );
-            return Ok(CallToolResult::success(vec![Content::text(text)]));
+            return Ok(format_output(&req.output_format, &json_resp, text));
         }
 
         let completed_list = if completed.is_empty() {
@@ -473,9 +794,20 @@ impl BmadServer {
             ));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
+        let json_resp = NextStepRecommendation {
+            current_phase: phase.name().to_string(),
+            current_phase_number: phase.number(),
+            detected_completed: completed.iter().map(|s| s.to_string()).collect(),
+            recommendations: recommendations.iter().map(|wf| RecommendationEntry {
+                workflow_id: wf.id.to_string(),
+                description: wf.description.to_string(),
+                agent: wf.agent.to_string(),
+                produces: wf.produces.to_string(),
+                prerequisites: wf.prerequisites.iter().map(|s| s.to_string()).collect(),
+            }).collect(),
+        };
+
+        Ok(format_output(&req.output_format, &json_resp, lines.join("\n")))
     }
 
     #[tool(description = "Answer questions about the BMad Method — phases, agents, workflows, \
@@ -563,9 +895,36 @@ impl BmadServer {
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
+        // Build JSON response
+        let phase_overview = if lower_q.contains("phase") || lower_q.contains("overview") || lower_q.contains("how") {
+            Some(Phase::all().iter().map(|p| PhaseOverviewEntry {
+                number: p.number(),
+                name: p.name().to_string(),
+                description: p.description().to_string(),
+                workflow_count: idx.get_phase_workflows(*p).len(),
+            }).collect())
+        } else {
+            None
+        };
+
+        let track_overview = if lower_q.contains("track") {
+            Some(Track::all().iter().map(|t| TrackOverviewEntry {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+            }).collect())
+        } else {
+            None
+        };
+
+        let json_resp = HelpResponse {
+            question: query.clone(),
+            context: req.context.clone(),
+            results: results.clone(),
+            phase_overview,
+            track_overview,
+        };
+
+        Ok(format_output(&req.output_format, &json_resp, lines.join("\n")))
     }
 
     #[tool(description = "Check whether a project is ready to enter the Implementation phase. \
@@ -583,6 +942,15 @@ impl BmadServer {
             .unwrap_or(Track::BmadMethod);
 
         let result = BmadIndex::check_readiness(&req.project_state, track);
+
+        let json_resp = ReadinessResponse {
+            ready: result.ready,
+            track: track.name().to_string(),
+            project_state: req.project_state.clone(),
+            missing_artifacts: result.missing_artifacts.clone(),
+            warnings: result.warnings.clone(),
+            next_action: result.next_action.clone(),
+        };
 
         let status = if result.ready { "READY" } else { "NOT READY" };
         let mut lines = vec![format!(
@@ -611,9 +979,7 @@ impl BmadServer {
 
         lines.push(format!("### Next Action\n\n{}", result.next_action));
 
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
+        Ok(format_output(&req.output_format, &json_resp, lines.join("\n")))
     }
 
     #[tool(description = "List all BMad Method agents. Optionally filter by phase to show only \
@@ -629,11 +995,15 @@ impl BmadServer {
             match parse_phase(phase_str) {
                 Some(phase) => idx.get_agents_by_phase(phase),
                 None => {
+                    let json_resp = PhaseErrorResponse {
+                        error: format!("Unknown phase '{}'", phase_str),
+                        valid_phases: vec!["Analysis".to_string(), "Planning".to_string(), "Solutioning".to_string(), "Implementation".to_string()],
+                    };
                     let text = format!(
                         "Unknown phase '{}'. Valid phases: Analysis, Planning, Solutioning, Implementation",
                         phase_str
                     );
-                    return Ok(CallToolResult::success(vec![Content::text(text)]));
+                    return Ok(format_output(&req.output_format, &json_resp, text));
                 }
             }
         } else {
@@ -664,9 +1034,18 @@ impl BmadServer {
             lines.push(format!("*{} agent(s) total*", agents.len()));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
+        let json_resp = AgentListResponse {
+            phase_filter: req.phase.clone(),
+            agents: agents.iter().map(|a| AgentEntry {
+                skill_id: a.skill_id.to_string(),
+                name: a.name.to_string(),
+                persona: a.persona.to_string(),
+                workflows: a.primary_workflows.iter().map(|s| s.to_string()).collect(),
+            }).collect(),
+            total: agents.len(),
+        };
+
+        Ok(format_output(&req.output_format, &json_resp, lines.join("\n")))
     }
 
     #[tool(description = "Get detailed information about a specific BMad Method agent by skill id. \
@@ -679,6 +1058,33 @@ impl BmadServer {
         let idx = self.index.read().await;
         match idx.get_agent(&req.agent_id) {
             Some(agent) => {
+                let json_workflows: Vec<AgentWorkflowEntry> = agent.primary_workflows.iter().map(|wf_id| {
+                    if let Some(wf) = idx.get_workflow(wf_id) {
+                        AgentWorkflowEntry {
+                            id: wf.id.to_string(),
+                            description: wf.description.to_string(),
+                            phase: wf.phase.name().to_string(),
+                            produces: wf.produces.to_string(),
+                            tracks: wf.tracks.iter().map(|t| t.name().to_string()).collect(),
+                        }
+                    } else {
+                        AgentWorkflowEntry {
+                            id: wf_id.to_string(),
+                            description: "(workflow not found in index)".to_string(),
+                            phase: String::new(),
+                            produces: String::new(),
+                            tracks: vec![],
+                        }
+                    }
+                }).collect();
+
+                let json_resp = AgentDetailResponse {
+                    skill_id: agent.skill_id.to_string(),
+                    name: agent.name.to_string(),
+                    persona: agent.persona.to_string(),
+                    workflows: json_workflows,
+                };
+
                 let mut lines = vec![format!(
                     "## Agent: {name}\n\n\
                      **Skill ID:** `{skill_id}`\n\
@@ -713,18 +1119,20 @@ impl BmadServer {
                     agent.skill_id,
                 ));
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    lines.join("\n"),
-                )]))
+                Ok(format_output(&req.output_format, &json_resp, lines.join("\n")))
             }
             None => {
                 let all: Vec<&str> = idx.all_agents().iter().map(|a| a.skill_id).collect();
+                let json_resp = AgentNotFoundResponse {
+                    error: format!("Agent '{}' not found", req.agent_id),
+                    available_agents: all.iter().map(|s| s.to_string()).collect(),
+                };
                 let text = format!(
                     "Agent '{}' not found. Available agents:\n{}",
                     req.agent_id,
                     all.join(", ")
                 );
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(format_output(&req.output_format, &json_resp, text))
             }
         }
     }
@@ -746,6 +1154,14 @@ impl BmadServer {
             after_this,
         } = BmadIndex::sprint_guide(&req.sprint_state);
 
+        let json_resp = SprintGuideResponse {
+            current_step: current_step.to_string(),
+            agent_to_invoke: agent_to_invoke.to_string(),
+            workflow_to_run: workflow_to_run.to_string(),
+            rationale: rationale.to_string(),
+            after_this: after_this.to_string(),
+        };
+
         let text = format!(
             "## Sprint Guide\n\n\
              **Current step:** {current_step}\n\
@@ -764,7 +1180,7 @@ impl BmadServer {
              6. Repeat for next epic",
         );
 
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(format_output(&req.output_format, &json_resp, text))
     }
 
     #[tool(description = "Scan a project directory and detect which BMad Method artifacts exist. \
@@ -794,6 +1210,19 @@ impl BmadServer {
         })?;
 
         if !state.bmad_installed {
+            let json_resp = ProjectStateResponse {
+                project_path: req.project_path.clone(),
+                bmad_installed: false,
+                prd_found: false,
+                architecture_found: false,
+                epic_count: 0,
+                sprint_status_found: false,
+                project_context_found: false,
+                suggested_track: String::new(),
+                current_phase: String::new(),
+                current_phase_number: 0,
+                recommended_next_step: String::new(),
+            };
             let text = format!(
                 "## Project State: {path}\n\n\
                  This does not appear to be a BMad project (`_bmad/` directory not found).\n\n\
@@ -801,7 +1230,7 @@ impl BmadServer {
                  configuration directory. Use `bmad_help` for guidance on setting up a new project.",
                 path = req.project_path,
             );
-            return Ok(CallToolResult::success(vec![Content::text(text)]));
+            return Ok(format_output(&req.output_format, &json_resp, text));
         }
 
         let found = |b: bool| if b { "found" } else { "not found" };
@@ -851,6 +1280,20 @@ impl BmadServer {
             "Quick Flow (or BMad Method — insufficient artifacts to determine)"
         };
 
+        let json_resp = ProjectStateResponse {
+            project_path: req.project_path.clone(),
+            bmad_installed: true,
+            prd_found: state.prd_found,
+            architecture_found: state.architecture_found,
+            epic_count: state.epic_count,
+            sprint_status_found: state.sprint_status_found,
+            project_context_found: state.project_context_found,
+            suggested_track: suggested_track.to_string(),
+            current_phase: phase.name().to_string(),
+            current_phase_number: phase.number(),
+            recommended_next_step: next_step.clone(),
+        };
+
         let text = format!(
             "## Project State: {path}\n\n\
              - BMad installed: yes\n\
@@ -873,7 +1316,7 @@ impl BmadServer {
             phase_num = phase.number(),
         );
 
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(format_output(&req.output_format, &json_resp, text))
     }
 
     #[tool(description = "Refresh the BMad Method documentation cache from the remote source. \
@@ -882,16 +1325,20 @@ impl BmadServer {
         If validation fails, the previous index is preserved.")]
     async fn bmad_refresh_docs(
         &self,
-        #[allow(unused_variables)] Parameters(_req): Parameters<RefreshDocsRequest>,
+        Parameters(req): Parameters<RefreshDocsRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let allowed = std::env::var("BMAD_ALLOW_REFRESH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
         if !allowed {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "Doc refresh is disabled. Set BMAD_ALLOW_REFRESH=1 to enable.",
-            )]));
+            let json_resp = RefreshResponse {
+                status: "disabled".to_string(),
+                message: "Doc refresh is disabled. Set BMAD_ALLOW_REFRESH=1 to enable.".to_string(),
+                bytes: None,
+            };
+            let text = "Doc refresh is disabled. Set BMAD_ALLOW_REFRESH=1 to enable.".to_string();
+            return Ok(format_output(&req.output_format, &json_resp, text));
         }
 
         let url = std::env::var("BMAD_DOCS_URL").map_err(|_| {
@@ -913,10 +1360,16 @@ impl BmadServer {
         if !validation.valid {
             let errors = validation.errors.join("; ");
             tracing::warn!(%url, %errors, "doc validation failed, keeping previous index");
-            return Ok(CallToolResult::success(vec![Content::text(format!(
+            let json_resp = RefreshResponse {
+                status: "validation_failed".to_string(),
+                message: format!("Doc refresh failed validation — previous index preserved. Validation errors: {errors}"),
+                bytes: None,
+            };
+            let text = format!(
                 "Doc refresh failed validation — previous index preserved.\n\
                  Validation errors: {errors}"
-            ))]));
+            );
+            return Ok(format_output(&req.output_format, &json_resp, text));
         }
 
         let bytes = docs.len();
@@ -926,9 +1379,15 @@ impl BmadServer {
 
         tracing::info!(%url, bytes, "index rebuilt with refreshed docs");
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        let json_resp = RefreshResponse {
+            status: "success".to_string(),
+            message: format!("Documentation refreshed successfully ({bytes} bytes). Index rebuilt."),
+            bytes: Some(bytes),
+        };
+        let text = format!(
             "Documentation refreshed successfully ({bytes} bytes). Index rebuilt.",
-        ))]))
+        );
+        Ok(format_output(&req.output_format, &json_resp, text))
     }
 
     #[tool(description = "Return diagnostic information about the current BMad index state: \
@@ -936,7 +1395,7 @@ impl BmadServer {
         total agents parsed, and doc byte size. No input parameters needed.")]
     async fn bmad_index_status(
         &self,
-        #[allow(unused_variables)] Parameters(_req): Parameters<IndexStatusRequest>,
+        Parameters(req): Parameters<IndexStatusRequest>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let idx = self.index.read().await;
         let source = idx.doc_source().to_string();
@@ -951,6 +1410,14 @@ impl BmadServer {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
+        let json_resp = IndexStatusResponse {
+            doc_source: source.clone(),
+            last_refresh: uptime.clone(),
+            total_workflows: workflows,
+            total_agents: agents,
+            doc_byte_size: byte_size,
+        };
+
         let text = format!(
             "## BMad Index Status\n\n\
              - **Doc source:** {source}\n\
@@ -960,7 +1427,91 @@ impl BmadServer {
              - **Doc byte size:** {byte_size}",
         );
 
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(format_output(&req.output_format, &json_resp, text))
+    }
+
+    #[tool(description = "Generate starter BMad Method project files in a target directory. \
+        Creates the standard _bmad/ config directory and planning artifact stubs \
+        pre-filled with track-appropriate boilerplate and TODO markers. \
+        Accepts a track (quick_flow, bmad_method, enterprise) and optional project_dir.")]
+    async fn bmad_scaffold(
+        &self,
+        Parameters(req): Parameters<ScaffoldRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let track = parse_track(&req.track).ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "Unknown track '{}'. Valid tracks: quick_flow, bmad_method, enterprise",
+                    req.track
+                ),
+                None,
+            )
+        })?;
+
+        let project_dir = req
+            .project_dir
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+
+        if !project_dir.exists() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("Directory does not exist: {}", project_dir.display()),
+                None,
+            ));
+        }
+        if !project_dir.is_dir() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("Path is not a directory: {}", project_dir.display()),
+                None,
+            ));
+        }
+
+        let ScaffoldResult {
+            files_created,
+            track,
+            next_steps,
+        } = BmadIndex::scaffold_project(&project_dir, track).map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("Failed to scaffold project: {e}"),
+                None,
+            )
+        })?;
+
+        let dir_display = project_dir.display().to_string();
+
+        let json_val = ScaffoldResponse {
+            track: track.name().to_string(),
+            project_dir: dir_display.clone(),
+            files_created: files_created.clone(),
+            next_steps: next_steps.iter().map(|s| s.to_string()).collect(),
+        };
+
+        let mut lines = vec![format!(
+            "## BMad Project Scaffolded\n\n\
+             **Track:** {}\n\
+             **Directory:** {}\n\n\
+             ### Files Created\n",
+            track.name(),
+            dir_display,
+        )];
+
+        for f in &files_created {
+            lines.push(format!("- `{f}`"));
+        }
+
+        lines.push("\n### Next Steps\n".to_string());
+        for step in &next_steps {
+            lines.push(format!("- Run `{step}` to fill in the generated stubs"));
+        }
+
+        lines.push(format!(
+            "\nUse `bmad_project_state` with `project_path: \"{}\"` to verify the scaffolded files.",
+            dir_display,
+        ));
+
+        let markdown = lines.join("\n");
+        Ok(format_output(&req.output_format, &json_val, markdown))
     }
 }
 
