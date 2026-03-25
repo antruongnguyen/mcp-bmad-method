@@ -2,7 +2,7 @@
   "name": "@bmad-method/mcp-server",
   "version": "1.0.0",
   "description": "MCP server for the BMad Method (Build More Architect Dreams)",
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/antruongnguyen/mcp-bmad-method"
