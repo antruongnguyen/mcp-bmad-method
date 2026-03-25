@@ -26,14 +26,6 @@ cargo install mcp-bmad-server
 
 Requires Rust 1.85+ (edition 2024 support).
 
-## Build
-
-```sh
-cargo build
-```
-
-For an optimized release build:
-
 ```sh
 cargo build --release
 ```
@@ -62,33 +54,60 @@ Configure the host and port with environment variables:
 BMAD_TRANSPORT=sse BMAD_HOST=0.0.0.0 BMAD_PORT=8080 cargo run
 ```
 
+### Environment Variables
+
 | Variable | Default | Description |
 |---|---|---|
 | `BMAD_TRANSPORT` | `stdio` | Transport mode: `stdio` or `sse` |
 | `BMAD_HOST` | `127.0.0.1` | Bind address for SSE mode |
 | `BMAD_PORT` | `3000` | Bind port for SSE mode |
+| `BMAD_DOCS_URL` | *(unset)* | URL to fetch BMad docs from (enables remote refresh) |
+| `BMAD_DOCS_CACHE_PATH` | `~/.cache/bmad-mcp/llms-full.txt` | Path to cache fetched docs on disk |
+| `BMAD_ALLOW_REFRESH` | `0` | Set to `1` to enable the `bmad_refresh_docs` tool |
+| `RUST_LOG` | `info` | Log level filter (e.g. `debug`, `warn`) |
 
-Logs are written to stderr. Set `RUST_LOG` to control log level:
+Logs are written to stderr. Stdout is reserved for MCP protocol messages.
 
-```sh
-RUST_LOG=debug cargo run
-```
+## Tools
 
-## Lint
+The server exposes 13 MCP tools:
 
-```sh
-cargo clippy
-```
+### Workflow Navigation
 
-## Release Binary
+| Tool | Description |
+|---|---|
+| `bmad_get_workflow` | Get metadata for a workflow by skill id (phase, agent, outputs, prerequisites, next steps) |
+| `bmad_get_next_steps` | Get recommended next-step workflows after completing a phase |
+| `bmad_get_track_workflows` | List all workflows for a planning track (Quick Flow, BMad Method, Enterprise) |
 
-Build an optimized release binary:
+### Project Guidance
 
-```sh
-cargo build --release
-```
+| Tool | Description |
+|---|---|
+| `bmad_next_step` | Recommend the next workflow based on current project state (free-text or JSON input) |
+| `bmad_help` | Answer questions about the BMad Method — phases, agents, workflows, tracks, and tools |
+| `bmad_check_readiness` | Validate whether a project is ready to enter the Implementation phase |
+| `bmad_sprint_guide` | Guide through the Implementation build cycle: story creation, implementation, review, retrospective |
 
-The binary is at `target/release/mcp-bmad-server`. It communicates over stdio so it can be used directly with any MCP client.
+### Project & Agent Discovery
+
+| Tool | Description |
+|---|---|
+| `bmad_list_agents` | List all BMad agents, optionally filtered by phase |
+| `bmad_agent_info` | Get detailed info about a specific agent by skill id |
+| `bmad_project_state` | Scan a project directory to detect existing BMad artifacts and infer current phase |
+| `bmad_scaffold` | Generate starter BMad project files (`_bmad/` directory and planning stubs) for a given track |
+
+### Server Management
+
+| Tool | Description |
+|---|---|
+| `bmad_refresh_docs` | Refresh the documentation cache from a remote URL (requires `BMAD_ALLOW_REFRESH=1`) |
+| `bmad_index_status` | Return diagnostic info about the index: doc source, refresh time, workflow/agent counts |
+
+### JSON Output Mode
+
+All tools accept an optional `output_format` parameter. Set it to `"json"` to receive structured JSON instead of the default markdown output. This is useful for programmatic consumption by other tools or scripts.
 
 ## Docker
 
@@ -136,6 +155,8 @@ Or if you installed the binary directly:
 }
 ```
 
+For SSE mode, connect your client to `http://127.0.0.1:3000/mcp`.
+
 ### Cursor
 
 Add to your MCP settings (see `example/cursor_mcp.json`):
@@ -150,3 +171,19 @@ Add to your MCP settings (see `example/cursor_mcp.json`):
   }
 }
 ```
+
+## Lint
+
+```sh
+cargo clippy
+```
+
+## Test
+
+```sh
+cargo test
+```
+
+## License
+
+MIT OR Apache-2.0

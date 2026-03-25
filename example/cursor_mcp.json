@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "bmad-method": {
-      "command": "/path/to/mcp-bmad-server"
+      "command": "npx",
+      "args": ["@bmad-method/mcp-server"]
     }
   }
 }

@@ -3,8 +3,9 @@ resolver = "3"
 members = ["mcp-bmad-server"]
 
 [workspace.package]
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
+authors = ["An Nguyen<annguyen.apps@gmail.com>"]
 
 [profile.release]
 opt-level = 3

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-03-25
+
+### Added
+- `bmad_scaffold` tool for generating starter project files with track-appropriate boilerplate (M13)
+- JSON output mode (`output_format: "json"`) on all tools for programmatic consumption (M15)
+- SSE/HTTP transport option alongside stdio (`BMAD_TRANSPORT=sse`) (M12)
+- `bmad_index_status` tool for index diagnostics (M14)
+- Error recovery with retry logic and doc validation on `bmad_refresh_docs` (M14)
+- Cross-platform release CI with prebuilt binaries (M18)
+- npm wrapper package `@bmad-method/mcp-server` for npx/global install (M16)
+
+### Changed
+- Bumped version from 0.9.0 to 1.0.0
+
 ## [0.9.0] — 2026-03-25
 
 ### Added
@@ -24,5 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rust workspace with MCP server skeleton using `rmcp` SDK (M0)
 - Example configs for Claude Desktop and Cursor MCP integration
 
-[Unreleased]: https://github.com/antruongnguyen/mcp-bmad-method/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/antruongnguyen/mcp-bmad-method/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/antruongnguyen/mcp-bmad-method/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/antruongnguyen/mcp-bmad-method/releases/tag/v0.9.0
