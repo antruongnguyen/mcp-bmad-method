@@ -3,6 +3,10 @@ name = "mcp-bmad-server"
 description = "MCP server for the BMad Method (Build More Architect Dreams)"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/antruongnguyen/mcp-bmad-method"
+keywords = ["mcp", "bmad", "llm", "workflow"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
